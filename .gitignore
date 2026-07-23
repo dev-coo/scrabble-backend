@@ -4,3 +4,8 @@ node_modules/
 # Claude Code / 플러그인 개인 세션·로컬 파일 (공유하지 않음)
 .claude/settings.local.json
 .omc/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
