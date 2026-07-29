@@ -1,0 +1,11 @@
+# 스크래블 백엔드 의존성
+#
+# 설치:
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+
+fastapi
+uvicorn[standard]
+
+# PostgreSQL 드라이버. [binary] 는 컴파일 없이 바로 설치되는 버전입니다.
+psycopg[binary]
