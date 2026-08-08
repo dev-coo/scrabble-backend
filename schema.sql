@@ -105,16 +105,22 @@ ALTER TABLE rooms ALTER COLUMN host_nickname SET NOT NULL;
 -- 들어가게 됩니다. 백엔드도 겹치지 않게 만들지만, DB 에도 걸어 둡니다.
 CREATE UNIQUE INDEX IF NOT EXISTS rooms_code_key ON rooms (code);
 
--- 코드 모양 규칙: 대문자·숫자 6자리.
+-- 코드 모양 규칙: 대문자·숫자 4자리.
 -- 헷갈리는 글자(O·0, I·1, L)는 아예 쓰지 않습니다. 친구에게 코드를
 -- 불러줄 때 "영어 오야, 숫자 영이야?"를 묻지 않아도 되게 하려는 것입니다.
 --
 -- DROP 후 ADD 하는 이유: ADD CONSTRAINT 에는 IF NOT EXISTS 가 없어서
 -- 두 번 실행하면 에러가 납니다. 먼저 지우고 다시 걸면 몇 번을 실행해도
 -- 안전합니다.
+--
+-- NOT VALID 를 붙인 이유: 예전에 6자리로 만들어 둔 방들이 이미 DB 에
+-- 들어 있습니다. NOT VALID 가 없으면 "옛날 데이터가 새 규칙에 안 맞는다"며
+-- 이 문장이 실패해서, 스키마를 아예 적용할 수 없게 됩니다.
+-- NOT VALID 는 **앞으로 들어오는 값만** 검사하고 옛날 것은 그냥 둡니다.
+-- (옛날 방은 이미 끝난 방이라 다시 쓰이지 않습니다)
 ALTER TABLE rooms DROP CONSTRAINT IF EXISTS rooms_code_valid;
 ALTER TABLE rooms ADD  CONSTRAINT rooms_code_valid
-    CHECK (code ~ '^[A-HJKMNP-Z2-9]{6}$');
+    CHECK (code ~ '^[A-HJKMNP-Z2-9]{4}$') NOT VALID;
 
 -- 방장 닉네임: 플레이어 닉네임과 같은 규칙 (공백만 금지, 1~20자)
 ALTER TABLE rooms DROP CONSTRAINT IF EXISTS rooms_host_nickname_valid;

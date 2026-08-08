@@ -68,12 +68,12 @@ HTTP API는 FastAPI가 스와거(`/docs`)와 `/openapi.json`을 **자동으로**
  │                                       │
  ├─ /ws/rooms?nickname=수진 접속          │
  │                                       │
- │  ◀── room_created (code: DQDZ3Z)      │
+ │  ◀── room_created (code: K7Q2)      │
  │      화면에 코드 띄우고 기다림          │
  │                                       │
  │   ······ 코드를 친구에게 알려줌 ······▶ │
  │                                       │
- │                    /ws/rooms/DQDZ3Z?nickname=엘리 접속 ─┤
+ │                    /ws/rooms/K7Q2?nickname=엘리 접속 ─┤
  │                                       │
  │  ◀── guest_joined (엘리)   joined ──▶ │
  │      ⬑ 요청하지 않았는데 온 소식        │
@@ -131,7 +131,7 @@ ws://localhost:11000/ws/rooms?nickname=수진
 ```json
 {
   "type": "room_created",
-  "code": "DQDZ3Z",
+  "code": "K7Q2",
   "name": "수진님의 방",
   "host_nickname": "수진",
   "max_players": 4
@@ -145,7 +145,7 @@ ws://localhost:11000/ws/rooms?nickname=수진
 | `host_nickname` | 공백이 정리된 최종 닉네임 |
 | `max_players` | 정원. 지금은 항상 `4` |
 
-**초대 코드 형식** — 대문자·숫자 6자리. **`O` `I` `L` `0` `1`은 나오지 않습니다.**
+**초대 코드 형식** — 대문자·숫자 4자리. **`O` `I` `L` `0` `1`은 나오지 않습니다.**
 코드를 불러줄 때 "영어 오야, 숫자 영이야?"를 묻지 않아도 되게 하려고 뺐습니다.
 
 > ⚠️ **이걸 받은 뒤 연결을 끊지 마세요.** 연결이 살아 있는 동안만 그 코드가
@@ -212,7 +212,7 @@ ws.onmessage = (e) => {
 ## ① 접속 주소
 
 ```
-ws://localhost:11000/ws/rooms/DQDZ3Z?nickname=엘리
+ws://localhost:11000/ws/rooms/K7Q2?nickname=엘리
 ```
 
 **소문자로 쳐도 됩니다.** 서버가 대문자로 맞춰줍니다.
@@ -232,7 +232,7 @@ ws://localhost:11000/ws/rooms/DQDZ3Z?nickname=엘리
 ```json
 {
   "type": "joined",
-  "code": "DQDZ3Z",
+  "code": "K7Q2",
   "host_nickname": "수진",
   "guest_nickname": "엘리"
 }
@@ -290,8 +290,8 @@ guest.onmessage = (e) => console.log("친구:", e.data);
 기대 결과:
 
 ```
-방장: {"type":"room_created","code":"DQDZ3Z", ...}
-친구: {"type":"joined","code":"DQDZ3Z","host_nickname":"수진","guest_nickname":"엘리"}
+방장: {"type":"room_created","code":"K7Q2", ...}
+친구: {"type":"joined","code":"K7Q2","host_nickname":"수진","guest_nickname":"엘리"}
 방장: {"type":"guest_joined","nickname":"엘리"}     ← 요청하지 않았는데 온 소식
 ```
 
@@ -358,7 +358,7 @@ ws://localhost:11000/ws/match?nickname=엘리
 기다리는 사람이 **있으면** — 바로 짝이 됩니다.
 
 ```json
-{ "type": "matched", "code": "UG59N9", "partner_nickname": "수진" }
+{ "type": "matched", "code": "7AH3", "partner_nickname": "수진" }
 ```
 
 | 필드 | 설명 |

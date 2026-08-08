@@ -103,13 +103,13 @@ channels:
       들어가는 데 성공하면 **방장에게도 알림이 갑니다.**
 
       주소의 `{code}` 자리에 코드를 넣고, 닉네임은 물음표 뒤에 붙입니다.
-      예: `ws://localhost:11000/ws/rooms/DQDZ3Z?nickname=엘리`
+      예: `ws://localhost:11000/ws/rooms/K7Q2?nickname=엘리`
 
       **소문자로 쳐도 됩니다.** 서버가 대문자로 맞춰줍니다.
     parameters:
       code:
-        description: 방장에게 받은 초대 코드. 대문자·숫자 6자리.
-        examples: [DQDZ3Z]
+        description: 방장에게 받은 초대 코드. 대문자·숫자 4자리.
+        examples: [K7Q2]
     bindings:
       ws:
         query:
@@ -330,7 +330,7 @@ components:
           code:
             type: string
             description: |
-              초대 코드. 대문자·숫자 6자리이며 `O` `I` `L` `0` `1` 은 나오지 않습니다.
+              초대 코드. 대문자·숫자 4자리이며 `O` `I` `L` `0` `1` 은 나오지 않습니다.
               (불러줄 때 헷갈리지 않게 하려고 뺐습니다)
           name:
             type: string
@@ -345,7 +345,7 @@ components:
         - name: 수진님이 방을 만들었을 때
           payload:
             type: room_created
-            code: DQDZ3Z
+            code: K7Q2
             name: 수진님의 방
             host_nickname: 수진
             max_players: 4
@@ -414,7 +414,7 @@ components:
         - name: 엘리와 짝이 되었을 때
           payload:
             type: matched
-            code: UG59N9
+            code: 7AH3
             partner_nickname: 엘리
 
     partnerLeft:
@@ -589,7 +589,7 @@ components:
         - name: 엘리가 수진님의 방에 들어갔을 때
           payload:
             type: joined
-            code: DQDZ3Z
+            code: K7Q2
             host_nickname: 수진
             guest_nickname: 엘리
 

@@ -330,10 +330,19 @@ async def websocket_endpoint(websocket: WebSocket):
 # 친구에게 코드를 불러줄 때 "영어 오야, 숫자 영이야?"를 묻지 않아도
 # 되게 하려는 것입니다. 눈으로 보고 옮겨 적는 값이라 이게 중요합니다.
 ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-ROOM_CODE_LENGTH = 6
+ROOM_CODE_LENGTH = 4
 
 # 코드가 이미 쓰이고 있으면 다시 뽑습니다. 몇 번까지 다시 뽑을지.
+#
+# 4자리면 만들 수 있는 코드가 92만 개쯤입니다. 6자리(8억 개)보다 훨씬
+# 적으니 겹칠 일도 그만큼 잦아지는데, 겹치면 조용히 다시 뽑으므로
+# 사용자는 알아채지 못합니다.
+#
+# ⚠️ 다만 **끝난 방의 코드도 계속 자리를 차지합니다.** 방이 수십만 개
+#    쌓이면 다시 뽑기도 자주 실패하게 됩니다. 그때가 되면 끝난 방의
+#    코드를 다시 쓸 수 있게 바꿔야 합니다. (지금 규모에서는 문제없음)
 ROOM_CODE_TRIES = 10
+
 
 class LiveRoom:
     """지금 서버에 살아 있는 방 하나.
@@ -783,7 +792,7 @@ async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
 async def join_room(websocket: WebSocket, code: str, nickname: str = Query(default="")):
     """초대 코드로 친구의 방에 들어갑니다.
 
-    접속 주소 예: `ws://localhost:11000/ws/rooms/DQDZ3Z?nickname=엘리`
+    접속 주소 예: `ws://localhost:11000/ws/rooms/K7Q2?nickname=엘리`
 
     들어가는 데 성공하면 **방장에게도** "누가 들어왔다"고 알려줍니다.
     그게 이 기능을 웹소켓으로 만든 이유입니다.

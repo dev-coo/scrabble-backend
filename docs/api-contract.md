@@ -315,7 +315,7 @@ curl -X DELETE http://localhost:11000/api/players/3
 | 컬럼 | 타입 | 설명 |
 |------|------|------|
 | `id` | SERIAL PRIMARY KEY | 자동 증가 번호 |
-| `code` | TEXT NOT NULL UNIQUE | 초대 코드 (대문자·숫자 6자리) |
+| `code` | TEXT NOT NULL UNIQUE | 초대 코드 (대문자·숫자 4자리) |
 | `host_nickname` | TEXT NOT NULL | 방을 만든 사람 |
 | `name` | TEXT NOT NULL | 방 이름 (1~30자) |
 | `max_players` | INTEGER NOT NULL | 정원 (2~4, 기본 4) |
