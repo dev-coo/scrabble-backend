@@ -32,8 +32,10 @@ info:
     초대 코드를 받습니다. 친구가 그 코드로 `/ws/rooms/{code}` 에 접속하면
     **방장에게 "들어왔다"는 소식이 갑니다.**
 
-    자리가 있는 그대로 하나뿐이라 세 번째 사람은 들어올 수 없습니다.
-    메시지를 주고받는 **채팅 자체는 아직 없습니다.**
+    자리가 하나뿐이라 세 번째 사람은 들어올 수 없습니다.
+
+    두 사람이 모이면 **서로 메시지를 주고받을 수 있습니다.**
+    보내는 쪽·받는 쪽 규칙은 방장이든 친구든 **완전히 같습니다.**
 
 servers:
   local:
@@ -83,6 +85,10 @@ channels:
         $ref: '#/components/messages/guestJoined'
       guestLeft:
         $ref: '#/components/messages/guestLeft'
+      chatIn:
+        $ref: '#/components/messages/chatIn'
+      chatOut:
+        $ref: '#/components/messages/chatOut'
       roomError:
         $ref: '#/components/messages/roomError'
 
@@ -116,6 +122,10 @@ channels:
         $ref: '#/components/messages/joined'
       hostLeft:
         $ref: '#/components/messages/hostLeft'
+      chatIn:
+        $ref: '#/components/messages/chatIn'
+      chatOut:
+        $ref: '#/components/messages/chatOut'
       joinError:
         $ref: '#/components/messages/joinError'
 
@@ -151,7 +161,17 @@ operations:
       - $ref: '#/channels/rooms/messages/roomCreated'
       - $ref: '#/channels/rooms/messages/guestJoined'
       - $ref: '#/channels/rooms/messages/guestLeft'
+      - $ref: '#/channels/rooms/messages/chatOut'
       - $ref: '#/channels/rooms/messages/roomError'
+
+  receiveChatFromHost:
+    action: receive
+    channel:
+      $ref: '#/channels/rooms'
+    title: 프론트엔드 → 백엔드 (방장이 보내는 것)
+    description: 채팅 메시지를 보냅니다. 상대가 아직 없으면 error 가 돌아옵니다.
+    messages:
+      - $ref: '#/channels/rooms/messages/chatIn'
 
   sendJoined:
     action: send
@@ -162,7 +182,17 @@ operations:
     messages:
       - $ref: '#/channels/join/messages/joined'
       - $ref: '#/channels/join/messages/hostLeft'
+      - $ref: '#/channels/join/messages/chatOut'
       - $ref: '#/channels/join/messages/joinError'
+
+  receiveChatFromGuest:
+    action: receive
+    channel:
+      $ref: '#/channels/join'
+    title: 프론트엔드 → 백엔드 (들어간 사람이 보내는 것)
+    description: 방장이 보내는 것과 **완전히 같은 형식**입니다.
+    messages:
+      - $ref: '#/channels/join/messages/chatIn'
 
 components:
   messages:
@@ -254,6 +284,72 @@ components:
             name: 수진님의 방
             host_nickname: 수진
             max_players: 4
+
+    chatIn:
+      name: message (보내는 쪽)
+      title: 채팅 메시지 보내기
+      summary: 상대에게 할 말을 보냅니다. **방장·친구 모두 같은 형식**입니다.
+      description: |
+        문자열이 아니라 **JSON 으로** 보내야 합니다.
+
+        ```javascript
+        ws.send(JSON.stringify({ type: "message", text: "안녕" }));
+        ```
+
+        앞뒤 공백은 서버가 정리합니다. 규칙에 안 맞으면 `error` 가 돌아오지만
+        **연결은 끊기지 않습니다.** 고쳐서 다시 보내면 됩니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, text]
+        properties:
+          type:
+            type: string
+            const: message
+            description: 메시지 종류. 지금은 이것 하나뿐입니다
+          text:
+            type: string
+            description: 할 말. 공백 제거 후 1~500자
+      examples:
+        - name: 인사 보내기
+          payload:
+            type: message
+            text: 안녕
+
+    chatOut:
+      name: message (받는 쪽)
+      title: 채팅 메시지 받기
+      summary: 상대가 보낸 말이 도착했습니다.
+      description: |
+        ⚠️ **내가 보낸 말은 나에게 되돌아오지 않습니다.** 내 말은 내 화면에
+        바로 그리세요. 되돌려 주면 같은 말이 두 번 그려지기 쉽습니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, from, text, at]
+        properties:
+          type:
+            type: string
+            const: message
+            description: 메시지 종류
+          from:
+            type: string
+            description: 보낸 사람의 닉네임
+          text:
+            type: string
+            description: 보낸 내용 (앞뒤 공백이 정리된 값)
+          at:
+            type: string
+            description: |
+              서버가 찍은 시각 (ISO 8601). **각자 컴퓨터의 시계가 아니라
+              서버 시계**입니다. 그래야 두 사람 화면에서 순서가 같습니다.
+      examples:
+        - name: 수진님이 보낸 말
+          payload:
+            type: message
+            from: 수진
+            text: 안녕 엘리
+            at: '2026-08-08T13:22:38.694059'
 
     guestJoined:
       name: guest_joined
@@ -411,9 +507,16 @@ components:
         **닉네임이 잘못된 경우** — 이 메시지를 보낸 뒤 서버가 연결을 끊습니다.
         (끊는 코드 `1008` = "규칙에 안 맞아서 끊음")
 
-        **말을 건 경우** — 채팅은 아직 없습니다. 연결은 그대로 두고
-        안내만 보냅니다. 조용히 무시하면 프론트엔드가 메시지가 갔다고
-        착각하기 때문에 일부러 알려줍니다.
+        **채팅 메시지가 규칙에 안 맞는 경우** — 연결은 그대로 두고 이유만
+        보냅니다. 고쳐서 다시 보내면 됩니다. 조용히 무시하면 프론트엔드가
+        메시지가 갔다고 착각하기 때문에 일부러 알려줍니다.
+
+        `message` 로 오는 것들:
+
+        - `상대가 아직 들어오지 않았습니다` — 혼자 있을 때 보냈습니다.
+        - `JSON 으로 보내주세요...` — 그냥 문자열을 보냈습니다.
+        - `{"type":"message","text":"..."} 형식으로 보내주세요` — 모르는 종류입니다.
+        - `빈 메시지는 보낼 수 없습니다` / `메시지는 500자 이하여야 합니다`
       contentType: application/json
       payload:
         type: object
@@ -431,10 +534,10 @@ components:
           payload:
             type: error
             message: 닉네임은 비어 있을 수 없습니다
-        - name: 말을 걸었을 때 (안 끊김)
+        - name: 혼자 있을 때 말을 걸었을 때 (안 끊김)
           payload:
             type: error
-            message: 채팅은 아직 만들어지지 않았습니다
+            message: 상대가 아직 들어오지 않았습니다
 
     clientText:
       name: clientText
@@ -469,8 +572,9 @@ components:
 #   끊기면 프론트엔드가 직접 다시 연결해야 합니다. (ws.onclose)
 # ─────────────────────────────────────────────────────────────
 x-not-implemented-yet:
-  - 채팅 메시지 주고받기 ← 다음 차례
-  - 지난 대화 내용 저장 (지금은 아무것도 남지 않음)
+  - 지난 대화 내용 저장 — **새로고침하면 대화가 전부 사라집니다**
+  - 상대가 읽었는지 표시 (읽음 확인)
+  - 상대가 입력 중인지 표시
   - 방장과 친구가 **같은 닉네임**이어도 막지 않음 (대화가 헷갈릴 수 있음)
   - 끊긴 뒤 같은 방으로 다시 들어가기 (재접속)
 

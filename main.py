@@ -11,6 +11,7 @@
 #   - 스와거 문서 : http://100.115.173.118:11000/docs
 #   - API 계약서  : http://100.115.173.118:11000/openapi.json
 # ─────────────────────────────────────────────────────────────
+import json
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -429,6 +430,25 @@ def set_room_status(code: str, status: str) -> None:
             cur.execute("UPDATE rooms SET status = %s WHERE code = %s", (status, code))
 
 
+# 한 번에 보낼 수 있는 글자 수. 제한이 없으면 아주 긴 글을 보내
+# 서버 메모리를 밀어붙이거나 상대 화면을 망가뜨릴 수 있습니다.
+CHAT_MAX_LENGTH = 500
+
+
+def clean_chat_text(value: str) -> str:
+    """채팅 메시지를 다듬고 규칙에 맞는지 봅니다.
+
+    닉네임(`clean_nickname`)과 같은 모양의 함수입니다. 검사 규칙을
+    한곳에 모아 두면 방장 쪽·친구 쪽이 서로 다르게 동작할 일이 없습니다.
+    """
+    value = value.strip()
+    if not value:
+        raise ValueError("빈 메시지는 보낼 수 없습니다")
+    if len(value) > CHAT_MAX_LENGTH:
+        raise ValueError(f"메시지는 {CHAT_MAX_LENGTH}자 이하여야 합니다")
+    return value
+
+
 async def send_quietly(websocket: Optional[WebSocket], payload: dict) -> None:
     """상대에게 알림을 보내되, 이미 끊겼으면 조용히 넘어갑니다.
 
@@ -442,6 +462,71 @@ async def send_quietly(websocket: Optional[WebSocket], payload: dict) -> None:
         await websocket.send_json(payload)
     except Exception:
         pass
+
+
+async def chat_loop(websocket: WebSocket, sender_nickname: str, find_partner) -> None:
+    """연결이 끊길 때까지 채팅 메시지를 받아 **상대에게 건네줍니다.**
+
+    방장 쪽과 친구 쪽이 이 함수 하나를 같이 씁니다. 1:1 이라 양쪽이
+    하는 일이 완전히 똑같기 때문입니다. 두 벌로 나눠 적으면 나중에
+    한쪽만 고쳐서 "방장은 되는데 친구는 안 되는" 사고가 납니다.
+
+    `find_partner` 는 "지금 상대가 누구인지"를 그때그때 알려주는
+    함수입니다. 상대는 도중에 나갔다 다시 들어올 수 있어서, 한 번 받아
+    들고 있으면 안 되고 보낼 때마다 다시 물어봐야 합니다.
+    """
+    while True:
+        raw = await websocket.receive_text()
+
+        # ① JSON 인가
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": 'JSON 으로 보내주세요. 예: {"type":"message","text":"안녕"}',
+                }
+            )
+            continue
+
+        # ② 우리가 아는 종류인가
+        if not isinstance(data, dict) or data.get("type") != "message":
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": '{"type":"message","text":"..."} 형식으로 보내주세요',
+                }
+            )
+            continue
+
+        # ③ 내용이 규칙에 맞는가
+        try:
+            text = clean_chat_text(str(data.get("text", "")))
+        except ValueError as e:
+            await websocket.send_json({"type": "error", "message": str(e)})
+            continue
+
+        # ④ 건네줄 상대가 있는가
+        partner = find_partner()
+        if partner is None:
+            await websocket.send_json(
+                {"type": "error", "message": "상대가 아직 들어오지 않았습니다"}
+            )
+            continue
+
+        # 보낸 사람에게는 되돌려 주지 않습니다. 자기가 쓴 말은 자기
+        # 화면에 바로 그리면 되고, 되돌려 주면 두 번 그려지기 쉽습니다.
+        await partner.send_json(
+            {
+                "type": "message",
+                "from": sender_nickname,
+                "text": text,
+                # 시각은 **서버가** 찍습니다. 각자 컴퓨터의 시계를 믿으면
+                # 시간이 뒤죽박죽인 대화창이 됩니다.
+                "at": datetime.now().isoformat(),
+            }
+        )
 
 
 @app.websocket("/ws/rooms")
@@ -497,16 +582,12 @@ async def host_room(websocket: WebSocket, nickname: str = Query(default="")):
     )
 
     try:
-        # 여기서부터가 "기다리기"입니다. 받을 게 없어도 연결을 붙잡고
+        # 여기서부터가 "기다리기"이자 "대화하기"입니다. 연결을 붙잡고
         # 있어야 나중에 서버가 먼저 말을 걸 수 있습니다.
-        while True:
-            await websocket.receive_text()
-            # 채팅은 아직 없습니다. 말을 걸어오면 조용히 무시하지 말고
-            # 왜 안 되는지 알려줍니다. 무시하면 프론트엔드는 메시지가
-            # 갔다고 착각합니다.
-            await websocket.send_json(
-                {"type": "error", "message": "채팅은 아직 만들어지지 않았습니다"}
-            )
+        #
+        # 상대(`live.guest`)를 미리 꺼내 두지 않고 그때그때 찾는 이유:
+        # 지금은 아직 아무도 없고, 나중에 들어오기 때문입니다.
+        await chat_loop(websocket, host_nickname, lambda: live.guest)
     except WebSocketDisconnect:
         # 방장이 탭을 닫은 경우입니다. 정상입니다.
         pass
@@ -604,11 +685,8 @@ async def join_room(websocket: WebSocket, code: str, nickname: str = Query(defau
     )
 
     try:
-        while True:
-            await websocket.receive_text()
-            await websocket.send_json(
-                {"type": "error", "message": "채팅은 아직 만들어지지 않았습니다"}
-            )
+        # 들어온 사람 쪽의 상대는 언제나 방장입니다.
+        await chat_loop(websocket, guest_nickname, lambda: room.host)
     except WebSocketDisconnect:
         pass
     finally:
