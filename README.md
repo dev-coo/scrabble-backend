@@ -107,3 +107,4 @@ with get_connection() as conn:
 - [`CLAUDE.md`](./CLAUDE.md) — Claude가 지킬 작업 규칙
 - [`docs/COLLABORATION.md`](./docs/COLLABORATION.md) — 사람이 읽는 협업 가이드
 - [`docs/api-contract.md`](./docs/api-contract.md) — 프론트엔드와의 API 계약
+- [`docs/ws-contract.md`](./docs/ws-contract.md) — 웹소켓 명세 (스와거에 안 나오므로 손으로 작성)

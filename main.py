@@ -14,7 +14,7 @@
 from datetime import datetime
 from typing import Annotated, List
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import AfterValidator, BaseModel, Field, field_validator
 
@@ -251,3 +251,48 @@ def delete_player(player_id: int):
         raise HTTPException(status_code=404, detail=f"id {player_id} 인 플레이어가 없습니다")
 
     return PlayerOut(id=row[0], nickname=row[1], created_at=row[2])
+
+
+# ─────────────────────────────────────────────────────────────
+# 웹소켓 — 초기 세팅 (연결 확인용 통로 하나)
+#
+# 지금까지 만든 API 와 무엇이 다른가:
+#   HTTP API 는 "물어보면 답하고 끊는" 방식입니다. 프론트엔드가
+#   물어보지 않으면 백엔드는 아무 말도 할 수 없습니다.
+#   웹소켓은 한 번 연결해 두면 **선이 계속 이어져 있어서**, 백엔드가
+#   먼저 말을 걸 수 있습니다. "누가 방에 들어왔다"처럼 다른 사람 때문에
+#   생긴 일을 알려주려면 이게 필요합니다.
+#
+# ⚠️ 여기 있는 건 **연결이 되는지 확인하는 통로**까지입니다.
+#    방 입장 알림·채팅·게임 진행 같은 실제 기능은 아직 없습니다.
+#    그것들은 각각 별도 기능 단위로 붙일 예정입니다.
+#
+# ⚠️ 이 경로는 **스와거(/docs)에 나오지 않습니다.** FastAPI 가 자동
+#    문서화해 주는 건 HTTP API 뿐입니다. 그래서 웹소켓은 사람이 직접
+#    쓴 명세서 `docs/ws-contract.md` 가 계약서 역할을 합니다.
+# ─────────────────────────────────────────────────────────────
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """연결을 받아주고, 받은 말을 그대로 되돌려 줍니다. (메아리)
+
+    되돌려 주기만 하는 이유: 프론트엔드가 "선이 진짜 연결됐고 양방향으로
+    오간다"를 눈으로 확인할 수 있는 가장 단순한 방법이기 때문입니다.
+    실제 기능이 붙으면 이 메아리는 없어집니다.
+    """
+    # 웹소켓은 HTTP 와 달리 서버가 "받겠다"고 명시해야 연결이 열립니다.
+    await websocket.accept()
+
+    # 연결되자마자 서버가 먼저 말을 겁니다. 프론트엔드는 이 메시지를
+    # 받아야 "연결 완료"를 확신할 수 있습니다.
+    await websocket.send_json({"type": "connected", "message": "웹소켓 연결됨"})
+
+    try:
+        # HTTP 는 한 번 답하면 끝이지만, 웹소켓은 끊길 때까지 계속
+        # 주고받습니다. 그래서 무한 반복문 안에서 기다립니다.
+        while True:
+            text = await websocket.receive_text()
+            await websocket.send_json({"type": "echo", "message": text})
+    except WebSocketDisconnect:
+        # 브라우저 탭을 닫는 등 상대가 먼저 끊는 건 **정상**입니다.
+        # 에러로 처리하면 서버 로그가 쓸데없이 지저분해집니다.
+        pass
