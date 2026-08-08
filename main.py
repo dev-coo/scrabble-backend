@@ -352,7 +352,9 @@ class LiveRoom:
     연결은 저장할 수 있는 물건이 아니라서 메모리에만 둘 수 있습니다.
     """
 
-    def __init__(self, code: str, host: WebSocket, host_nickname: str):
+    def __init__(self, room_id: int, code: str, host: WebSocket, host_nickname: str):
+        # DB 의 rooms.id. 대화를 저장할 때 "어느 방의 말인지" 적는 데 씁니다.
+        self.room_id = room_id
         self.code = code
         self.host = host                      # 방장의 연결
         self.host_nickname = host_nickname
@@ -460,6 +462,24 @@ def clean_chat_text(value: str) -> str:
     return value
 
 
+def insert_message(room_id: int, sender: str, text: str) -> datetime:
+    """오간 말 한 줄을 저장하고, **DB 가 찍은 시각**을 돌려줍니다.
+
+    시각을 파이썬에서 만들지 않고 DB 가 준 값을 그대로 쓰는 이유:
+    저장된 기록과 상대 화면에 뜨는 시각이 **한 글자도 다르지 않게**
+    하기 위해서입니다. 따로 만들면 아주 조금씩 어긋나고, 나중에
+    "화면에는 3초인데 DB 에는 4초"처럼 설명하기 어려운 일이 생깁니다.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO messages (room_id, sender, text)"
+                " VALUES (%s, %s, %s) RETURNING created_at",
+                (room_id, sender, text),
+            )
+            return cur.fetchone()[0]
+
+
 async def send_quietly(websocket: Optional[WebSocket], payload: dict) -> None:
     """상대에게 알림을 보내되, 이미 끊겼으면 조용히 넘어갑니다.
 
@@ -475,16 +495,17 @@ async def send_quietly(websocket: Optional[WebSocket], payload: dict) -> None:
         pass
 
 
-async def chat_loop(websocket: WebSocket, sender_nickname: str, find_partner) -> None:
-    """연결이 끊길 때까지 채팅 메시지를 받아 **상대에게 건네줍니다.**
+async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) -> None:
+    """연결이 끊길 때까지 채팅 메시지를 받아 **저장하고 상대에게 건네줍니다.**
 
     방장 쪽과 친구 쪽이 이 함수 하나를 같이 씁니다. 1:1 이라 양쪽이
     하는 일이 완전히 똑같기 때문입니다. 두 벌로 나눠 적으면 나중에
     한쪽만 고쳐서 "방장은 되는데 친구는 안 되는" 사고가 납니다.
 
-    `find_partner` 는 "지금 상대가 누구인지"를 그때그때 알려주는
-    함수입니다. 상대는 도중에 나갔다 다시 들어올 수 있어서, 한 번 받아
-    들고 있으면 안 되고 보낼 때마다 다시 물어봐야 합니다.
+    `find_context` 는 "지금 어느 방이고 상대가 누구인지"를 그때그때
+    알려주는 함수입니다. `(방, 상대)` 를 주고, 아직 상대가 없으면
+    `None` 을 줍니다. 상대는 도중에 나갔다 다시 들어올 수 있어서,
+    한 번 받아 들고 있으면 안 되고 보낼 때마다 다시 물어봐야 합니다.
     """
     while True:
         raw = await websocket.receive_text()
@@ -519,12 +540,26 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_partner) ->
             continue
 
         # ④ 건네줄 상대가 있는가
-        partner = find_partner()
-        if partner is None:
+        context = find_context()
+        if context is None:
             await websocket.send_json(
                 {"type": "error", "message": "상대가 아직 들어오지 않았습니다"}
             )
             continue
+
+        room, partner = context
+
+        # ⑤ 먼저 저장하고, 그다음 건네줍니다.
+        #
+        # 순서가 중요합니다. 건네준 뒤에 저장하면, 저장이 실패했을 때
+        # **화면에는 떴는데 기록에는 없는** 말이 생깁니다. 나중에 대화를
+        # 꺼내 보면 조용히 한 줄이 비어 있게 되는데, 그게 훨씬 나쁩니다.
+        #
+        # 대신 DB 에 문제가 생기면 대화 자체가 멈춥니다. 그건 눈에 띄는
+        # 고장이라 오히려 고치기 쉽습니다.
+        sent_at = await run_in_threadpool(
+            insert_message, room.room_id, sender_nickname, text
+        )
 
         # 보낸 사람에게는 되돌려 주지 않습니다. 자기가 쓴 말은 자기
         # 화면에 바로 그리면 되고, 되돌려 주면 두 번 그려지기 쉽습니다.
@@ -533,9 +568,9 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_partner) ->
                 "type": "message",
                 "from": sender_nickname,
                 "text": text,
-                # 시각은 **서버가** 찍습니다. 각자 컴퓨터의 시계를 믿으면
-                # 시간이 뒤죽박죽인 대화창이 됩니다.
-                "at": datetime.now().isoformat(),
+                # 시각은 **DB 가 저장하면서 찍은 값**입니다. 저장된 기록과
+                # 화면에 뜨는 시각이 어긋나지 않게 하려는 것입니다.
+                "at": sent_at.isoformat(),
             }
         )
 
@@ -577,7 +612,7 @@ async def host_room(websocket: WebSocket, nickname: str = Query(default="")):
 
     # 이 줄이 "대기 상태"의 실체입니다. 표에 올라가 있어야 나중에
     # 친구가 코드를 들고 왔을 때 이 연결을 찾아낼 수 있습니다.
-    live = LiveRoom(code, websocket, room["host_nickname"])
+    live = LiveRoom(room["id"], code, websocket, room["host_nickname"])
     live_rooms[code] = live
 
     # 방이 만들어지자마자 코드를 보냅니다. 프론트엔드는 이걸 받아서
@@ -598,7 +633,11 @@ async def host_room(websocket: WebSocket, nickname: str = Query(default="")):
         #
         # 상대(`live.guest`)를 미리 꺼내 두지 않고 그때그때 찾는 이유:
         # 지금은 아직 아무도 없고, 나중에 들어오기 때문입니다.
-        await chat_loop(websocket, host_nickname, lambda: live.guest)
+        await chat_loop(
+            websocket,
+            host_nickname,
+            lambda: (live, live.guest) if live.guest is not None else None,
+        )
     except WebSocketDisconnect:
         # 방장이 탭을 닫은 경우입니다. 정상입니다.
         pass
@@ -691,6 +730,18 @@ def partner_of(me: Waiter) -> Optional[WebSocket]:
     return me.room.guest if me.is_host else me.room.host
 
 
+def context_of(me: Waiter):
+    """`(방, 상대)` 를 알려줍니다. 아직 짝이 없으면 `None`.
+
+    `chat_loop` 이 대화를 저장하려면 상대뿐 아니라 **어느 방인지**도
+    알아야 해서 둘을 함께 줍니다.
+    """
+    partner = partner_of(me)
+    if me.room is None or partner is None:
+        return None
+    return me.room, partner
+
+
 @app.websocket("/ws/match")
 async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
     """아무나 기다리는 사람과 짝지어 줍니다.
@@ -732,7 +783,7 @@ async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
             return
 
         code = room["code"]
-        live = LiveRoom(code, partner.websocket, partner.nickname)
+        live = LiveRoom(room["id"], code, partner.websocket, partner.nickname)
         live.guest = websocket
         live.guest_nickname = my_nickname
         live_rooms[code] = live
@@ -757,9 +808,9 @@ async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
 
     try:
         # 기다리는 중이든 대화 중이든 같은 반복문입니다. 아직 짝이 없으면
-        # `partner_of` 가 None 을 주고, chat_loop 가 "상대가 아직
+        # `context_of` 가 None 을 주고, chat_loop 가 "상대가 아직
         # 들어오지 않았습니다"라고 알려줍니다.
-        await chat_loop(websocket, my_nickname, lambda: partner_of(me))
+        await chat_loop(websocket, my_nickname, lambda: context_of(me))
     except WebSocketDisconnect:
         pass
     finally:
@@ -861,7 +912,7 @@ async def join_room(websocket: WebSocket, code: str, nickname: str = Query(defau
 
     try:
         # 들어온 사람 쪽의 상대는 언제나 방장입니다.
-        await chat_loop(websocket, guest_nickname, lambda: room.host)
+        await chat_loop(websocket, guest_nickname, lambda: (room, room.host))
     except WebSocketDisconnect:
         pass
     finally:

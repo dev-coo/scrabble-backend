@@ -126,3 +126,49 @@ ALTER TABLE rooms ADD  CONSTRAINT rooms_code_valid
 ALTER TABLE rooms DROP CONSTRAINT IF EXISTS rooms_host_nickname_valid;
 ALTER TABLE rooms ADD  CONSTRAINT rooms_host_nickname_valid
     CHECK (length(trim(host_nickname)) BETWEEN 1 AND 20);
+
+
+-- ─────────────────────────────────────────────────────────────
+-- messages — 오간 대화 한 줄 한 줄
+--
+-- 지금까지 대화는 두 사람의 화면에만 있었습니다. 창을 닫으면 그대로
+-- 사라졌습니다. 이 테이블이 그 내용을 남겨 둡니다.
+--
+-- 컬럼을 이렇게 정한 이유:
+--   room_id    어느 방에서 오간 말인지. 이게 없으면 모든 대화가
+--              한 덩어리로 섞여서 나중에 갈라낼 수 없습니다.
+--   sender     누가 한 말인지. 지금은 닉네임을 글자 그대로 적습니다.
+--              players 테이블과 이어져 있지 않기 때문입니다.
+--   text       내용.
+--   created_at 언제 한 말인지. **대화를 순서대로 보여주려면 필수**입니다.
+--
+-- 왜 방 코드가 아니라 room_id 인가: 코드는 사람이 읽는 값이고, 나중에
+-- 규칙이 바뀔 수 있습니다(방금 6자리에서 4자리로 바꿨듯이). id 는
+-- DB 가 매기는 번호라 절대 바뀌지 않아서 이어 붙이기에 안전합니다.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS messages (
+    id         serial PRIMARY KEY,
+
+    -- REFERENCES 는 "이 번호는 rooms 에 실제로 있는 방이어야 한다"는
+    -- 규칙입니다. 없는 방의 대화가 저장되는 걸 DB 가 막아 줍니다.
+    --
+    -- ON DELETE CASCADE 는 "그 방이 지워지면 이 대화도 같이 지워라".
+    -- 이게 없으면 방을 지울 때 "대화가 남아 있어서 못 지운다"고 막히거나,
+    -- 주인 없는 대화만 덩그러니 남습니다.
+    room_id    integer NOT NULL REFERENCES rooms (id) ON DELETE CASCADE,
+
+    sender     text NOT NULL,
+    text       text NOT NULL,
+    created_at timestamp NOT NULL DEFAULT now(),
+
+    -- 백엔드에서도 검사하지만 DB 에도 걸어 둡니다. (마지막 방어선)
+    CONSTRAINT messages_sender_valid
+        CHECK (length(trim(sender)) BETWEEN 1 AND 20),
+    CONSTRAINT messages_text_valid
+        CHECK (length(trim(text)) BETWEEN 1 AND 500)
+);
+
+-- 대화를 꺼내 볼 때는 언제나 "이 방의 말들을 시간 순서로"입니다.
+-- 그 모양 그대로 색인을 만들어 두면 방이 많아져도 빠릅니다.
+CREATE INDEX IF NOT EXISTS messages_room_id_created_at_idx
+    ON messages (room_id, created_at);

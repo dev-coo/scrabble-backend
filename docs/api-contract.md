@@ -326,6 +326,22 @@ curl -X DELETE http://localhost:11000/api/players/3
 > 들어오는데 한 칸에 여러 명을 넣을 수 없어서, 방 입장 기능을 만들 때
 > 별도 테이블로 다룹니다. (`host_nickname` 은 한 명뿐이라 여기 있습니다)
 
+**`messages`** — 오간 대화 한 줄 한 줄
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `id` | SERIAL PRIMARY KEY | 자동 증가 번호 |
+| `room_id` | INTEGER NOT NULL → `rooms.id` | 어느 방의 대화인지. 방이 지워지면 함께 지워짐 |
+| `sender` | TEXT NOT NULL | 보낸 사람 닉네임 (1~20자) |
+| `text` | TEXT NOT NULL | 내용 (1~500자) |
+| `created_at` | TIMESTAMP | 저장된 시각. **웹소켓으로 보내는 `at` 과 같은 값** |
+
+> 방 **코드**가 아니라 `room_id` 로 이어 붙인 이유: 코드는 사람이 읽는
+> 값이라 규칙이 바뀔 수 있지만(6자리 → 4자리처럼), `id` 는 DB가 매기는
+> 번호라 절대 바뀌지 않습니다.
+>
+> ⚠️ 대화를 **꺼내 보는 API는 아직 없습니다.** 저장만 됩니다.
+
 접속·조회 방법은 [`README.md`](../README.md#데이터베이스) 참고.
 
 ## 작업 방식
