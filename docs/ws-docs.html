@@ -1,0 +1,370 @@
+<!doctype html>
+<!--
+  웹소켓 명세 화면 — 스와거(/docs)의 웹소켓 버전
+
+  ⚠️ 이 파일에는 명세 내용이 들어 있지 않습니다.
+     /asyncapi.json 을 읽어서 그리기만 합니다.
+     내용을 고치려면 docs/asyncapi.yaml 을 고치세요.
+
+  바깥에서 받아오는 것이 하나도 없어서 인터넷 없이도 동작합니다.
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>스크래블 웹소켓 명세</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1b1f23; --muted: #6a737d; --line: #e1e4e8;
+    --card: #f8f9fa; --code-bg: #f1f3f5; --accent: #2b6cb0;
+    --recv: #1a7f5a; --recv-bg: #e6f4ee; --send: #b45309; --send-bg: #fdf3e3;
+    --warn-bg: #fff8e1; --warn-line: #f0c36d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --fg: #e6e9ef; --muted: #9aa4b2; --line: #262c35;
+      --card: #161b22; --code-bg: #1b2129; --accent: #6fb3f2;
+      --recv: #58d1a1; --recv-bg: #12241d; --send: #e0a758; --send-bg: #241c10;
+      --warn-bg: #221d10; --warn-line: #6b5320;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+          "Malgun Gothic", "Noto Sans KR", sans-serif;
+  }
+  code, pre, .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 20px 80px; }
+
+  header h1 { margin: 0 0 4px; font-size: 26px; }
+  .version {
+    display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 20px;
+    background: var(--card); border: 1px solid var(--line); color: var(--muted);
+  }
+  .lede { color: var(--muted); margin: 12px 0 0; }
+
+  .note {
+    margin: 20px 0; padding: 12px 14px; border-radius: 8px; font-size: 14px;
+    background: var(--warn-bg); border: 1px solid var(--warn-line);
+  }
+  .note b { color: var(--fg); }
+
+  h2 {
+    font-size: 18px; margin: 40px 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  h3 { font-size: 15px; margin: 0; }
+
+  .srv {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .srv .url { font-size: 17px; font-weight: 600; word-break: break-all; }
+  .srv .why { color: var(--muted); font-size: 13px; margin-top: 6px; }
+
+  .msg { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 14px; overflow: hidden; }
+  .msg > summary {
+    list-style: none; cursor: pointer; padding: 12px 16px; display: flex;
+    align-items: center; gap: 10px; flex-wrap: wrap; background: var(--card);
+  }
+  .msg > summary::-webkit-details-marker { display: none; }
+  .msg > summary::after { content: "▾"; margin-left: auto; color: var(--muted); }
+  .msg[open] > summary::after { content: "▴"; }
+  .dir {
+    font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 4px;
+    white-space: nowrap;
+  }
+  .dir.recv { color: var(--recv); background: var(--recv-bg); }
+  .dir.send { color: var(--send); background: var(--send-bg); }
+  .name { font-size: 13px; padding: 2px 7px; border-radius: 4px; background: var(--code-bg); }
+  .summ { color: var(--muted); font-size: 13px; width: 100%; }
+  .body { padding: 4px 16px 16px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--card); font-weight: 600; }
+  .req { color: #c0392b; font-weight: 700; }
+  @media (prefers-color-scheme: dark) { .req { color: #ff8b7a; } }
+
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px 14px; overflow-x: auto; font-size: 13px; margin: 8px 0;
+  }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+  pre code { background: none; padding: 0; }
+  .label { font-size: 12px; color: var(--muted); margin-top: 12px; font-weight: 600; }
+
+  ul.plain { margin: 8px 0; padding-left: 20px; }
+  ul.plain li { margin: 4px 0; }
+
+  /* 직접 해보기 */
+  .try { border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: var(--card); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  input[type=text] {
+    flex: 1; min-width: 180px; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+    font-family: inherit; font-size: 14px;
+  }
+  button {
+    padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); font: inherit; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .status { font-size: 13px; margin-bottom: 10px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.on { background: var(--recv); }
+  #log {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px; height: 200px; overflow-y: auto; font-size: 12.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  #log p { margin: 0 0 4px; word-break: break-all; }
+  #log .t { color: var(--muted); }
+  #log .in { color: var(--recv); }
+  #log .out { color: var(--send); }
+  #log .sys { color: var(--muted); font-style: italic; }
+  .empty { color: var(--muted); font-size: 13px; }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: 13px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <p class="empty">명세를 불러오는 중…</p>
+</div>
+
+<script>
+"use strict";
+
+// ── 아주 작은 도구들 ────────────────────────────────────────
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// 명세 글에 쓰인 **굵게** 와 `코드` 만 처리하는 최소 서식기.
+// 마크다운 전체를 지원하려고 바깥 라이브러리를 받아오면 인터넷이
+// 없을 때 화면이 통째로 안 나옵니다. 그래서 딱 두 가지만 직접 처리합니다.
+const fmt = (s) => esc(s || "").trim()
+  // [\s\S] 인 이유: 명세 글에서 **굵게** 가 줄바꿈을 넘어가는 경우가 있는데,
+  // 그냥 . 을 쓰면 줄바꿈을 못 넘어가서 별표가 그대로 보입니다.
+  .replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>")
+  .replace(/`([^`]+)`/g, "<code>$1</code>")
+  .replace(/\n{2,}/g, "</p><p>")
+  .replace(/\n/g, "<br>");
+const para = (s) => (s && s.trim()) ? `<p>${fmt(s)}</p>` : "";
+
+// AsyncAPI 는 같은 내용을 반복해 적지 않으려고 $ref 로 "저기를 보라"고
+// 가리킵니다. 화면에 그리려면 그 가리킨 곳을 실제 값으로 바꿔야 합니다.
+function deref(node, spec, depth = 0) {
+  if (depth > 20 || node === null || typeof node !== "object") return node;
+  if (Array.isArray(node)) return node.map((n) => deref(n, spec, depth + 1));
+  if (typeof node.$ref === "string" && node.$ref.startsWith("#/")) {
+    const target = node.$ref.slice(2).split("/")
+      .reduce((o, k) => (o == null ? undefined : o[k]), spec);
+    return deref(target, spec, depth + 1);
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(node)) out[k] = deref(v, spec, depth + 1);
+  return out;
+}
+
+// ── 그리기 ──────────────────────────────────────────────────
+function renderPayload(payload) {
+  if (!payload) return "";
+  if (payload.type === "object" && payload.properties) {
+    const required = payload.required || [];
+    const rows = Object.entries(payload.properties).map(([key, p]) => {
+      const fixed = p.const !== undefined ? ` <code>"${esc(p.const)}"</code> 고정` : "";
+      return `<tr>
+        <td><code>${esc(key)}</code>${required.includes(key) ? ' <span class="req">*</span>' : ""}</td>
+        <td>${esc(p.type || "")}${fixed}</td>
+        <td>${fmt(p.description || "")}</td>
+      </tr>`;
+    }).join("");
+    return `<div class="label">필드</div>
+      <table><thead><tr><th>이름</th><th>타입</th><th>설명</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+      <p class="empty"><span class="req">*</span> 는 항상 들어 있는 필드입니다.</p>`;
+  }
+  return `<div class="label">형식</div><pre><code>${esc(payload.type || "정해지지 않음")}</code></pre>`;
+}
+
+function renderExamples(examples, contentType) {
+  if (!examples || !examples.length) return "";
+  return examples.map((ex) => {
+    const isJson = (contentType || "").includes("json");
+    const body = isJson ? JSON.stringify(ex.payload, null, 2) : String(ex.payload);
+    return `<div class="label">예시 — ${esc(ex.name || "")}</div>
+            <pre><code>${esc(body)}</code></pre>`;
+  }).join("");
+}
+
+function renderMessage(msg, direction) {
+  const cls = direction === "send" ? "recv" : "send";   // 프론트 입장에서 뒤집힘
+  const label = direction === "send" ? "받음 ◀ 백엔드" : "보냄 ▶ 백엔드";
+  return `<details class="msg">
+    <summary>
+      <span class="dir ${cls}">${label}</span>
+      <span class="name">${esc(msg.name || "")}</span>
+      <h3>${esc(msg.title || "")}</h3>
+      <span class="summ">${fmt(msg.summary || "")}</span>
+    </summary>
+    <div class="body">
+      ${para(msg.description)}
+      ${msg.contentType ? `<div class="label">내용 형식</div><p><code>${esc(msg.contentType)}</code></p>` : ""}
+      ${renderPayload(msg.payload)}
+      ${renderExamples(msg.examples, msg.contentType)}
+    </div>
+  </details>`;
+}
+
+function renderOperation(op) {
+  const msgs = (op.messages || []).map((m) => renderMessage(m, op.action)).join("");
+  return `<h2>${esc(op.title || op.action)}</h2>${para(op.description)}${msgs}`;
+}
+
+function render(spec) {
+  const d = (n) => deref(n, spec);
+  const info = spec.info || {};
+  const server = d(Object.values(spec.servers || {})[0]) || {};
+  const channel = d(Object.values(spec.channels || {})[0]) || {};
+  const url = `${server.protocol || "ws"}://${server.host || location.host}${channel.address || ""}`;
+  const ops = Object.values(spec.operations || {}).map(d);
+
+  const notYet = (spec["x-not-implemented-yet"] || [])
+    .map((s) => `<li>${esc(s)}</li>`).join("");
+  const disconnect = (spec["x-disconnect"] || []).map((r) =>
+    `<tr><td>${esc(r["상황"])}</td><td>${esc(r["결과"])}</td></tr>`).join("");
+
+  document.getElementById("app").innerHTML = `
+    <header>
+      <h1>${esc(info.title || "웹소켓 명세")} <span class="version">v${esc(info.version || "")}</span></h1>
+      ${para(info.description)}
+    </header>
+
+    <div class="note">
+      <b>이 화면은 스와거(<code>/docs</code>)의 웹소켓 버전입니다.</b><br>
+      웹소켓은 스와거에 자동으로 나오지 않아서 따로 만들었습니다.
+      내용의 원본은 <code>docs/asyncapi.yaml</code> 이고, 이 화면은 그 파일을
+      <a href="/asyncapi.json">/asyncapi.json</a> 으로 읽어서 그리기만 합니다.
+      (원본: <a href="/asyncapi.yaml">/asyncapi.yaml</a>)
+    </div>
+
+    <h2>접속 주소</h2>
+    <div class="srv">
+      <div class="url mono">${esc(url)}</div>
+      <div class="why">${esc(server.description || "")}</div>
+      ${para(channel.description)}
+    </div>
+
+    ${ops.map(renderOperation).join("")}
+
+    <h2>직접 해보기</h2>
+    <p class="empty">스와거의 “Try it out” 처럼, 여기서 바로 연결해 볼 수 있습니다.</p>
+    <div class="try">
+      <div class="status"><span class="dot" id="dot"></span><span id="state">연결 안 됨</span></div>
+      <div class="row">
+        <input type="text" id="url" value="${esc(url)}">
+        <button class="primary" id="conn">연결</button>
+        <button id="disc" disabled>끊기</button>
+      </div>
+      <div class="row">
+        <input type="text" id="text" placeholder="보낼 말을 입력하세요" disabled>
+        <button id="send" disabled>보내기</button>
+      </div>
+      <div id="log"><p class="sys">아직 아무것도 오가지 않았습니다.</p></div>
+    </div>
+
+    <h2>아직 없는 것</h2>
+    <p>지금은 <b>통로만</b> 있습니다. 아래는 하나도 구현돼 있지 않습니다.</p>
+    <ul class="plain">${notYet}</ul>
+    <p class="empty">두 명이 각각 접속해도 서로의 메시지는 보이지 않고, 각자 자기 메아리만 받습니다.</p>
+
+    <h2>연결이 끊기는 경우</h2>
+    <table><thead><tr><th>상황</th><th>결과</th></tr></thead><tbody>${disconnect}</tbody></table>
+    <p class="empty">끊기면 프론트엔드가 직접 다시 연결해야 합니다. 서버는 먼저 다시 걸지 않습니다.</p>
+
+    <footer>
+      사람이 읽는 설명은 <code>docs/ws-contract.md</code> 에 있습니다.
+      HTTP API 문서는 <a href="/docs">/docs</a> 입니다.
+    </footer>`;
+
+  wireTryIt();
+}
+
+// ── 직접 해보기 패널 ────────────────────────────────────────
+function wireTryIt() {
+  const $ = (id) => document.getElementById(id);
+  const log = $("log");
+  let ws = null;
+  let first = true;
+
+  function add(kind, text) {
+    if (first) { log.innerHTML = ""; first = false; }
+    const time = new Date().toLocaleTimeString("ko-KR");
+    const p = document.createElement("p");
+    p.innerHTML = `<span class="t">${time}</span> <span class="${kind}">${esc(text)}</span>`;
+    log.appendChild(p);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setConnected(on) {
+    $("dot").classList.toggle("on", on);
+    $("state").textContent = on ? "연결됨" : "연결 안 됨";
+    $("conn").disabled = on;
+    $("disc").disabled = !on;
+    $("text").disabled = !on;
+    $("send").disabled = !on;
+  }
+
+  $("conn").onclick = () => {
+    try {
+      ws = new WebSocket($("url").value.trim());
+    } catch (e) {
+      add("sys", "주소가 잘못됐습니다: " + e.message);
+      return;
+    }
+    add("sys", "연결 시도 중…");
+    ws.onopen = () => { setConnected(true); add("sys", "연결됨"); };
+    ws.onmessage = (e) => add("in", "◀ " + e.data);
+    ws.onerror = () => add("sys", "오류가 났습니다. 서버가 켜져 있는지 확인하세요.");
+    ws.onclose = (e) => {
+      setConnected(false);
+      add("sys", `끊김 (코드 ${e.code})`);
+      ws = null;
+    };
+  };
+
+  $("disc").onclick = () => ws && ws.close();
+
+  function send() {
+    const text = $("text").value;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !text) return;
+    ws.send(text);
+    add("out", "▶ " + text);
+    $("text").value = "";
+  }
+  $("send").onclick = send;
+  $("text").onkeydown = (e) => { if (e.key === "Enter") send(); };
+}
+
+// ── 시작 ────────────────────────────────────────────────────
+fetch("/asyncapi.json")
+  .then((r) => {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  })
+  .then(render)
+  .catch((e) => {
+    document.getElementById("app").innerHTML =
+      `<h1>명세를 불러오지 못했습니다</h1>
+       <p class="empty">${esc(e.message)}</p>
+       <p><code>docs/asyncapi.yaml</code> 파일이 있는지, 서버가 켜져 있는지 확인하세요.</p>`;
+  });
+</script>
+</body>
+</html>

@@ -9,3 +9,9 @@ uvicorn[standard]
 
 # PostgreSQL 드라이버. [binary] 는 컴파일 없이 바로 설치되는 버전입니다.
 psycopg[binary]
+
+# 웹소켓 명세(docs/asyncapi.yaml)를 읽는 데 씁니다.
+# uvicorn[standard] 를 깔면 딸려 오긴 하지만, 우리가 직접 쓰는 것이므로
+# 여기 적어 둡니다. 안 적어 두면 uvicorn 쪽 사정으로 사라졌을 때
+# 이유를 모른 채 서버가 안 뜹니다.
+PyYAML

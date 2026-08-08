@@ -319,5 +319,6 @@ curl -X DELETE http://localhost:11000/api/players/3
 - 백엔드가 API를 바꾸면 `/openapi.json` 과 `/docs` 가 **자동으로 갱신**되므로
   항상 최신 계약을 참조할 수 있습니다.
 - **웹소켓(WebSocket)은 이 문서에 없습니다.** 스와거가 자동 문서화해 주지 않으므로
-  별도 문서 [`docs/ws-contract.md`](./ws-contract.md) 에 손으로 적습니다.
+  별도로 손수 만든 세트를 씁니다 — 화면 **<http://localhost:11000/ws-docs>**,
+  명세 [`docs/asyncapi.yaml`](./asyncapi.yaml), 설명 [`docs/ws-contract.md`](./ws-contract.md).
   현재 상태: 연결 확인용 통로 하나까지.

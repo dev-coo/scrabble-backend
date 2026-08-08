@@ -107,4 +107,6 @@ with get_connection() as conn:
 - [`CLAUDE.md`](./CLAUDE.md) — Claude가 지킬 작업 규칙
 - [`docs/COLLABORATION.md`](./docs/COLLABORATION.md) — 사람이 읽는 협업 가이드
 - [`docs/api-contract.md`](./docs/api-contract.md) — 프론트엔드와의 API 계약
-- [`docs/ws-contract.md`](./docs/ws-contract.md) — 웹소켓 명세 (스와거에 안 나오므로 손으로 작성)
+- [`docs/ws-contract.md`](./docs/ws-contract.md) — 웹소켓 설명 (사람이 읽는 문서)
+- [`docs/asyncapi.yaml`](./docs/asyncapi.yaml) — 웹소켓 명세 원본 (기계가 읽는 계약서)
+  - 눈으로 보는 화면: <http://localhost:11000/ws-docs> ← 스와거의 웹소켓 버전

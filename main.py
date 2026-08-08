@@ -12,10 +12,13 @@
 #   - API 계약서  : http://100.115.173.118:11000/openapi.json
 # ─────────────────────────────────────────────────────────────
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, List
 
+import yaml
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import AfterValidator, BaseModel, Field, field_validator
 
 from db import get_connection
@@ -296,3 +299,69 @@ async def websocket_endpoint(websocket: WebSocket):
         # 브라우저 탭을 닫는 등 상대가 먼저 끊는 건 **정상**입니다.
         # 에러로 처리하면 서버 로그가 쓸데없이 지저분해집니다.
         pass
+
+
+# ─────────────────────────────────────────────────────────────
+# 웹소켓 명세 제공 — 스와거의 웹소켓 버전
+#
+# HTTP API 는 FastAPI 가 /openapi.json(기계용) 과 /docs(사람용 화면) 을
+# 자동으로 만들어 줍니다. 웹소켓은 그게 없어서 같은 두 짝을 직접 만듭니다.
+#
+#   docs/asyncapi.yaml  = 원본 (손으로 씀)          ← openapi.json 자리
+#   /asyncapi.yaml      = 그 파일을 그대로 제공
+#   /asyncapi.json      = 같은 내용을 JSON 으로 제공 (화면이 읽어감)
+#   /ws-docs            = 사람이 보는 화면            ← /docs 자리
+#
+# "AsyncAPI" 는 웹소켓용 명세 표준의 이름입니다. HTTP 쪽 표준이
+# OpenAPI 인 것과 같은 관계입니다. 표준을 따르면 나중에 다른 도구를
+# 붙이기 쉽습니다.
+#
+# 파일을 미리 읽어두지 않고 **요청이 올 때마다 읽습니다.** 명세를 고치면
+# 서버를 껐다 켜지 않아도 화면에 바로 반영되도록 하기 위해서입니다.
+# ─────────────────────────────────────────────────────────────
+DOCS_DIR = Path(__file__).parent / "docs"
+ASYNCAPI_FILE = DOCS_DIR / "asyncapi.yaml"
+WS_DOCS_FILE = DOCS_DIR / "ws-docs.html"
+
+
+def _read_docs_file(path: Path) -> str:
+    """docs/ 안의 파일을 읽어 옵니다. 없으면 이유를 분명히 알려줍니다."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # 조용히 빈 화면을 주면 "왜 안 나오지?"로 한참 헤매게 됩니다.
+        raise HTTPException(status_code=500, detail=f"{path.name} 파일이 없습니다")
+
+
+@app.get("/asyncapi.yaml", response_class=PlainTextResponse, tags=["웹소켓 명세"])
+def asyncapi_yaml():
+    """웹소켓 명세 원본(YAML)을 그대로 돌려줍니다.
+
+    `/openapi.json` 과 같은 자리의 "기계가 읽는 계약서"입니다.
+    """
+    return PlainTextResponse(
+        _read_docs_file(ASYNCAPI_FILE),
+        media_type="application/yaml; charset=utf-8",
+    )
+
+
+@app.get("/asyncapi.json", tags=["웹소켓 명세"])
+def asyncapi_json():
+    """같은 명세를 JSON 으로 돌려줍니다.
+
+    YAML 과 JSON 은 **같은 내용을 적는 두 가지 표기법**입니다. 사람이 쓰기엔
+    YAML 이 편하고, 브라우저·프로그램이 읽기엔 JSON 이 편해서 둘 다 냅니다.
+    원본은 어디까지나 YAML 파일 하나뿐이라 서로 어긋날 일이 없습니다.
+    """
+    return yaml.safe_load(_read_docs_file(ASYNCAPI_FILE))
+
+
+@app.get("/ws-docs", response_class=HTMLResponse, tags=["웹소켓 명세"])
+def ws_docs():
+    """웹소켓 명세를 눈으로 보는 화면. (스와거의 `/docs` 에 해당)
+
+    이 화면은 내용을 스스로 갖고 있지 않고, `/asyncapi.json` 을 읽어서
+    그리기만 합니다. 그래서 `docs/asyncapi.yaml` 만 고치면 화면이 따라옵니다.
+    내용이 두 군데로 갈라지지 않게 하려는 것입니다.
+    """
+    return HTMLResponse(_read_docs_file(WS_DOCS_FILE))

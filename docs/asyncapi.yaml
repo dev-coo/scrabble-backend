@@ -1,0 +1,165 @@
+# ─────────────────────────────────────────────────────────────
+# 웹소켓 명세 (AsyncAPI 3.0)
+#
+# 이 파일이 웹소켓 계약의 "원본"입니다.
+#   - 사람이 읽는 설명  → docs/ws-contract.md
+#   - 기계가 읽는 계약  → 이 파일          ← openapi.json 과 같은 자리
+#   - 눈으로 보는 화면  → http://localhost:11000/ws-docs
+#
+# HTTP API 는 FastAPI 가 openapi.json 을 자동으로 만들어 주지만,
+# 웹소켓은 그런 게 없어서 이 파일을 손으로 씁니다.
+#
+# ⚠️ 웹소켓을 고치면 이 파일도 함께 고쳐야 합니다.
+#    코드와 자동으로 연결돼 있지 않아서, 안 고치면 조용히 거짓말하는
+#    문서가 됩니다. /ws-docs 화면은 이 파일을 그대로 읽어 그립니다.
+# ─────────────────────────────────────────────────────────────
+asyncapi: 3.0.0
+
+info:
+  title: 스크래블 웹소켓
+  version: 0.1.0
+  description: |
+    실시간 통로입니다. HTTP API 와 달리 **연결이 계속 이어져 있어서
+    백엔드가 먼저 말을 걸 수 있습니다.**
+
+    현재 범위는 **연결 확인용 통로 하나**까지입니다.
+    여러 사람에게 알리기 · 방 구분 · 접속자 식별은 아직 없습니다.
+
+servers:
+  local:
+    host: localhost:11000
+    protocol: ws
+    description: 개발용 로컬 서버. HTTP API 와 같은 포트를 씁니다.
+
+channels:
+  ws:
+    address: /ws
+    title: 연결 확인 통로
+    description: |
+      접속할 때 넘기는 값은 **없습니다.** 그냥 연결하면 됩니다.
+      방 번호·닉네임을 받는 건 방 입장 기능을 붙일 때 정합니다.
+    messages:
+      connected:
+        $ref: '#/components/messages/connected'
+      echo:
+        $ref: '#/components/messages/echo'
+      clientText:
+        $ref: '#/components/messages/clientText'
+
+operations:
+  sendToClient:
+    action: send
+    channel:
+      $ref: '#/channels/ws'
+    title: 백엔드 → 프론트엔드
+    description: 서버가 보내는 메시지는 **항상 JSON** 이며, `type` 필드로 종류를 구분합니다.
+    messages:
+      - $ref: '#/channels/ws/messages/connected'
+      - $ref: '#/channels/ws/messages/echo'
+
+  receiveFromClient:
+    action: receive
+    channel:
+      $ref: '#/channels/ws'
+    title: 프론트엔드 → 백엔드
+    description: 지금은 형식이 정해져 있지 않습니다. 아무 문자열이나 보내면 됩니다.
+    messages:
+      - $ref: '#/channels/ws/messages/clientText'
+
+components:
+  messages:
+    connected:
+      name: connected
+      title: 연결 완료
+      summary: 접속 직후 서버가 **먼저** 보냅니다. (1회)
+      description: |
+        프론트엔드는 이걸 받아야 "연결 완료"를 확신할 수 있습니다.
+        연결 상태 표시등을 켜는 시점으로 쓰세요.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, message]
+        properties:
+          type:
+            type: string
+            const: connected
+            description: 메시지 종류
+          message:
+            type: string
+            description: 사람이 읽는 안내 문구
+      examples:
+        - name: 연결 직후
+          payload:
+            type: connected
+            message: 웹소켓 연결됨
+
+    echo:
+      name: echo
+      title: 메아리 (임시)
+      summary: 내가 보낸 문자열을 그대로 돌려줍니다.
+      description: |
+        ⚠️ **임시 기능입니다.** "선이 진짜 양방향으로 통하는지" 눈으로
+        확인하는 용도라, 실제 기능이 붙으면 사라집니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, message]
+        properties:
+          type:
+            type: string
+            const: echo
+            description: 메시지 종류
+          message:
+            type: string
+            description: 내가 보낸 문자열 그대로
+      examples:
+        - name: "'안녕' 을 보냈을 때"
+          payload:
+            type: echo
+            message: 안녕
+
+    clientText:
+      name: clientText
+      title: 아무 문자열
+      summary: 형식 없음. 아무 문자열이나 보내면 됩니다.
+      description: |
+        지금은 연결 확인용이라 형식이 없습니다.
+        실제 기능이 붙으면 `{"type": "...", ...}` 형태의 JSON 으로 바뀝니다.
+      contentType: text/plain
+      payload:
+        type: string
+      examples:
+        - name: 아무 말
+          payload: 안녕
+
+# ─────────────────────────────────────────────────────────────
+# 아직 없는 것 (중요)
+#
+# 지금은 통로만 있습니다. 아래는 하나도 구현돼 있지 않습니다.
+#   - 여러 사람에게 동시에 알리기 (한 명이 보낸 걸 다른 사람들이 받는 것)
+#   - 방 구분 (누가 어느 방에 있는지)
+#   - 누가 연결했는지 식별 (닉네임·플레이어 id)
+#   - 연결이 끊긴 사람 정리
+#
+# 두 명이 각각 접속해도 서로의 메시지는 보이지 않고, 각자 자기 메아리만
+# 받습니다. 위 항목들은 각각 별도 기능 단위로 진행합니다.
+#
+# 연결이 끊기는 경우:
+#   - 브라우저 탭을 닫음        → 정상 종료
+#   - 서버를 껐다 켬 (--reload) → 끊김. 자동 재연결 안 됨
+#   - 네트워크 끊김             → 끊김
+#   끊기면 프론트엔드가 직접 다시 연결해야 합니다. (ws.onclose)
+# ─────────────────────────────────────────────────────────────
+x-not-implemented-yet:
+  - 여러 사람에게 동시에 알리기 (브로드캐스트)
+  - 방 구분 (누가 어느 방에 있는지)
+  - 누가 연결했는지 식별 (닉네임·플레이어 id)
+  - 연결이 끊긴 사람 정리
+
+x-disconnect:
+  - 상황: 브라우저 탭·창을 닫음
+    결과: 정상 종료. 서버는 에러로 보지 않습니다.
+  - 상황: 서버를 껐다 켬 (--reload 포함)
+    결과: 연결이 끊깁니다. 자동으로 다시 연결되지 않습니다.
+  - 상황: 네트워크가 끊김
+    결과: 연결이 끊깁니다.
