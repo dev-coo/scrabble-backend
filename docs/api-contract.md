@@ -310,6 +310,22 @@ curl -X DELETE http://localhost:11000/api/players/3
 | `nickname` | TEXT NOT NULL | 닉네임 |
 | `created_at` | TIMESTAMP | 생성 시각 (기본값 `now()`) |
 
+**`rooms`**
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `id` | SERIAL PRIMARY KEY | 자동 증가 번호 |
+| `code` | TEXT NOT NULL UNIQUE | 초대 코드 (대문자·숫자 6자리) |
+| `host_nickname` | TEXT NOT NULL | 방을 만든 사람 |
+| `name` | TEXT NOT NULL | 방 이름 (1~30자) |
+| `max_players` | INTEGER NOT NULL | 정원 (2~4, 기본 4) |
+| `status` | TEXT NOT NULL | `waiting` / `playing` / `finished` (기본 `waiting`) |
+| `created_at` | TIMESTAMP | 생성 시각 (기본값 `now()`) |
+
+> "누가 이 방에 들어와 있는가"는 이 테이블에 없습니다. 한 방에 여러 명이
+> 들어오는데 한 칸에 여러 명을 넣을 수 없어서, 방 입장 기능을 만들 때
+> 별도 테이블로 다룹니다. (`host_nickname` 은 한 명뿐이라 여기 있습니다)
+
 접속·조회 방법은 [`README.md`](../README.md#데이터베이스) 참고.
 
 ## 작업 방식

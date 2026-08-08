@@ -11,12 +11,15 @@
 #   - 스와거 문서 : http://100.115.173.118:11000/docs
 #   - API 계약서  : http://100.115.173.118:11000/openapi.json
 # ─────────────────────────────────────────────────────────────
+import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, List
+from typing import Annotated, Dict, List, Optional
 
 import yaml
+from psycopg import errors as pg_errors
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import AfterValidator, BaseModel, Field, field_validator
@@ -299,6 +302,327 @@ async def websocket_endpoint(websocket: WebSocket):
         # 브라우저 탭을 닫는 등 상대가 먼저 끊는 건 **정상**입니다.
         # 에러로 처리하면 서버 로그가 쓸데없이 지저분해집니다.
         pass
+
+
+# ─────────────────────────────────────────────────────────────
+# 방 만들고 기다리기 (웹소켓)
+#
+# 1:1 채팅이라 흐름이 이렇습니다:
+#   1. 방장이 닉네임을 들고 웹소켓에 접속한다
+#   2. 서버가 방을 만들고 **초대 코드를 바로 보내준다**
+#   3. 방장은 연결을 붙잡은 채 **기다린다**
+#   4. (다음 기능) 친구가 코드를 치고 들어오면 → 방장에게 알려준다
+#
+# 왜 HTTP API 가 아니라 웹소켓인가:
+#   코드만 받는 것이라면 HTTP 로도 됩니다. 하지만 방장은 그 뒤에
+#   **"친구가 들어왔다"는 소식을 받아야** 합니다. 그건 방장이 요청한 게
+#   아니라 남 때문에 생긴 일이라, 서버가 먼저 말을 걸 수 있어야 합니다.
+#   그러려면 방장의 연결이 그때까지 살아 있어야 하고, 그래서 방을 만드는
+#   순간부터 웹소켓으로 이어져 있는 것입니다.
+#   HTTP 로 방을 만들면 기다리는 연결이 없어서 아무도 들어올 수 없는
+#   죽은 방이 됩니다.
+# ─────────────────────────────────────────────────────────────
+
+# 코드에 쓸 글자. O·0, I·1, L 은 일부러 뺐습니다.
+# 친구에게 코드를 불러줄 때 "영어 오야, 숫자 영이야?"를 묻지 않아도
+# 되게 하려는 것입니다. 눈으로 보고 옮겨 적는 값이라 이게 중요합니다.
+ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+ROOM_CODE_LENGTH = 6
+
+# 코드가 이미 쓰이고 있으면 다시 뽑습니다. 몇 번까지 다시 뽑을지.
+ROOM_CODE_TRIES = 10
+
+class LiveRoom:
+    """지금 서버에 살아 있는 방 하나.
+
+    DB 의 `rooms` 행과는 **다른 것**입니다. DB 에는 "이런 방이 있었다"는
+    기록이 남지만, 여기에는 **지금 연결돼 있는 실제 통로**가 들어 있습니다.
+    연결은 저장할 수 있는 물건이 아니라서 메모리에만 둘 수 있습니다.
+    """
+
+    def __init__(self, code: str, host: WebSocket, host_nickname: str):
+        self.code = code
+        self.host = host                      # 방장의 연결
+        self.host_nickname = host_nickname
+        self.guest: Optional[WebSocket] = None  # 나중에 들어올 친구의 연결
+        self.guest_nickname: Optional[str] = None
+
+
+# 지금 살아 있는 방들. { 초대 코드: LiveRoom }
+#
+# 친구가 코드를 들고 오면 이 표에서 방을 찾아 방장에게 "들어왔다"고
+# 알려줍니다. 표에 없는 코드는 곧 "들어갈 수 없는 코드"입니다.
+#
+# ⚠️ 이 표는 **서버 메모리에만** 있습니다. DB 가 아닙니다.
+#    연결은 지금 켜져 있는 이 서버에만 존재하는 것이라 저장할 수가
+#    없습니다. 그래서 서버를 껐다 켜면 기다리던 방은 모두 사라지고,
+#    그 코드들은 못 쓰게 됩니다.
+live_rooms: Dict[str, LiveRoom] = {}
+
+
+def new_room_code() -> str:
+    """추측하기 어려운 초대 코드를 하나 만듭니다.
+
+    `random` 이 아니라 `secrets` 를 쓰는 이유: `random` 으로 만든 값은
+    규칙성이 있어서 다음 값을 예측할 수 있습니다. 초대 코드를 예측당하면
+    **초대받지 않은 사람이 남의 방에 들어옵니다.** `secrets` 는 그런
+    용도로 만들어진 도구입니다.
+    """
+    return "".join(secrets.choice(ROOM_CODE_ALPHABET) for _ in range(ROOM_CODE_LENGTH))
+
+
+def insert_room(host_nickname: str):
+    """방을 하나 만들어 저장하고, 저장된 내용을 돌려줍니다.
+
+    방 이름은 따로 받지 않고 `"OO님의 방"` 으로 자동으로 짓습니다.
+    (테이블에 이름 자리가 있어서 뭔가는 들어가야 하는데, 접속할 때
+    오는 건 닉네임뿐이기 때문입니다.)
+
+    코드를 만들지 못하면 `None` 을 돌려줍니다.
+    """
+    with get_connection() as conn:
+        # 아주 낮은 확률로 이미 쓰이는 코드가 뽑힐 수 있습니다. 그때는
+        # 에러를 내지 말고 조용히 다시 뽑는 게 맞습니다. 사용자 잘못이
+        # 아니니까요.
+        for _ in range(ROOM_CODE_TRIES):
+            code = new_room_code()
+            try:
+                # 이 안에서 실패하면 이 INSERT 만 없던 일이 됩니다.
+                # 그래야 다음 코드로 다시 시도할 수 있습니다.
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO rooms (code, host_nickname, name)"
+                            " VALUES (%s, %s, %s)"
+                            " RETURNING id, code, host_nickname, name, max_players",
+                            (code, host_nickname, f"{host_nickname}님의 방"),
+                        )
+                        row = cur.fetchone()
+                return {
+                    "id": row[0],
+                    "code": row[1],
+                    "host_nickname": row[2],
+                    "name": row[3],
+                    "max_players": row[4],
+                }
+            except pg_errors.UniqueViolation:
+                # DB 가 "그 코드는 이미 있다"고 막아준 경우입니다.
+                continue
+
+    # 열 번을 다시 뽑아도 계속 겹쳤다면 코드 자릿수가 부족하다는 뜻입니다.
+    return None
+
+
+def set_room_status(code: str, status: str) -> None:
+    """방의 상태를 바꿉니다.
+
+    `waiting`  = 방장 혼자 기다리는 중 (친구가 들어올 수 있음)
+    `playing`  = 두 명이 다 모임 (더 이상 못 들어옴)
+    `finished` = 방장이 나가서 끝난 방 (영영 못 들어옴)
+
+    방장이 나갔는데 코드가 그대로 살아 있으면, 친구가 코드를 쳤을 때
+    "있는데 못 들어가는 방"이 되어 더 헷갈립니다. 그래서 끝나면
+    `finished` 로 표시해 둡니다.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE rooms SET status = %s WHERE code = %s", (status, code))
+
+
+async def send_quietly(websocket: Optional[WebSocket], payload: dict) -> None:
+    """상대에게 알림을 보내되, 이미 끊겼으면 조용히 넘어갑니다.
+
+    뒷정리 도중에 쓰는 함수입니다. 상대가 이미 나간 뒤라면 보내기가
+    실패하는데, 그건 **정상 상황**입니다. 여기서 에러를 터뜨리면
+    남은 뒷정리(표에서 빼기 등)가 중간에 멈춰버립니다.
+    """
+    if websocket is None:
+        return
+    try:
+        await websocket.send_json(payload)
+    except Exception:
+        pass
+
+
+@app.websocket("/ws/rooms")
+async def host_room(websocket: WebSocket, nickname: str = Query(default="")):
+    """방을 만들고, 친구가 들어올 때까지 연결을 붙잡은 채 기다립니다.
+
+    접속 주소 예: `ws://localhost:11000/ws/rooms?nickname=수진`
+    """
+    # 먼저 연결을 받아줍니다. 받아주기 전에 거절하면 프론트엔드는
+    # "왜 거절당했는지"를 알 방법이 없습니다. 일단 받아준 뒤 이유를
+    # 말해주고 끊는 편이 훨씬 친절합니다.
+    await websocket.accept()
+
+    # 닉네임 규칙은 플레이어 추가와 **완전히 같은 함수**를 씁니다.
+    try:
+        host_nickname = clean_nickname(nickname)
+    except ValueError as e:
+        await websocket.send_json({"type": "error", "message": str(e)})
+        # 1008 = "규칙에 안 맞아서 끊는다"는 뜻의 웹소켓 표준 코드입니다.
+        await websocket.close(code=1008)
+        return
+
+    # DB 작업은 "끝날 때까지 기다리는" 방식이라, 그냥 부르면 그동안
+    # 서버 전체가 멈춰서 다른 사람의 연결까지 같이 기다리게 됩니다.
+    # 그래서 옆에서 따로 돌리도록 넘깁니다.
+    room = await run_in_threadpool(insert_room, host_nickname)
+
+    if room is None:
+        await websocket.send_json(
+            {"type": "error", "message": "방을 만들지 못했습니다. 잠시 후 다시 시도해 주세요"}
+        )
+        # 1011 = "서버 쪽 사정으로 끊는다"
+        await websocket.close(code=1011)
+        return
+
+    code = room["code"]
+
+    # 이 줄이 "대기 상태"의 실체입니다. 표에 올라가 있어야 나중에
+    # 친구가 코드를 들고 왔을 때 이 연결을 찾아낼 수 있습니다.
+    live = LiveRoom(code, websocket, room["host_nickname"])
+    live_rooms[code] = live
+
+    # 방이 만들어지자마자 코드를 보냅니다. 프론트엔드는 이걸 받아서
+    # 화면에 띄우고 "친구에게 알려주세요"라고 안내하면 됩니다.
+    await websocket.send_json(
+        {
+            "type": "room_created",
+            "code": code,
+            "name": room["name"],
+            "host_nickname": room["host_nickname"],
+            "max_players": room["max_players"],
+        }
+    )
+
+    try:
+        # 여기서부터가 "기다리기"입니다. 받을 게 없어도 연결을 붙잡고
+        # 있어야 나중에 서버가 먼저 말을 걸 수 있습니다.
+        while True:
+            await websocket.receive_text()
+            # 채팅은 아직 없습니다. 말을 걸어오면 조용히 무시하지 말고
+            # 왜 안 되는지 알려줍니다. 무시하면 프론트엔드는 메시지가
+            # 갔다고 착각합니다.
+            await websocket.send_json(
+                {"type": "error", "message": "채팅은 아직 만들어지지 않았습니다"}
+            )
+    except WebSocketDisconnect:
+        # 방장이 탭을 닫은 경우입니다. 정상입니다.
+        pass
+    finally:
+        # 연결이 어떻게 끝나든 뒷정리는 반드시 합니다. 안 그러면 표에
+        # 죽은 연결이 쌓여서, 나중에 친구가 코드를 쳤을 때 이미 끊긴
+        # 방장에게 말을 걸려다 실패합니다.
+        live_rooms.pop(code, None)
+
+        # 방장이 나가면 1:1 대화는 더 이상 성립하지 않습니다. 친구를
+        # 그대로 두면 아무 반응 없는 화면 앞에 앉아 있게 되므로,
+        # 이유를 알려주고 함께 끊습니다.
+        if live.guest is not None:
+            await send_quietly(
+                live.guest, {"type": "host_left", "message": "방장이 나갔습니다"}
+            )
+            try:
+                # 1001 = "이쪽 사정으로 나간다"는 뜻의 웹소켓 표준 코드
+                await live.guest.close(code=1001)
+            except Exception:
+                pass
+
+        await run_in_threadpool(set_room_status, code, "finished")
+
+
+@app.websocket("/ws/rooms/{code}")
+async def join_room(websocket: WebSocket, code: str, nickname: str = Query(default="")):
+    """초대 코드로 친구의 방에 들어갑니다.
+
+    접속 주소 예: `ws://localhost:11000/ws/rooms/DQDZ3Z?nickname=엘리`
+
+    들어가는 데 성공하면 **방장에게도** "누가 들어왔다"고 알려줍니다.
+    그게 이 기능을 웹소켓으로 만든 이유입니다.
+    """
+    await websocket.accept()
+
+    # 닉네임 규칙은 방을 만들 때와 **완전히 같은 함수**를 씁니다.
+    try:
+        guest_nickname = clean_nickname(nickname)
+    except ValueError as e:
+        await websocket.send_json({"type": "error", "message": str(e)})
+        await websocket.close(code=1008)
+        return
+
+    # 코드는 사람이 눈으로 보고 옮겨 적는 값입니다. 소문자로 쳤다고
+    # 못 들어가게 하면 불친절하므로 대문자로 맞춰줍니다.
+    code = code.strip().upper()
+
+    room = live_rooms.get(code)
+
+    # "없는 코드"와 "방장이 이미 나간 코드"를 굳이 구분해서 알려주지
+    # 않습니다. 어느 쪽이든 친구가 할 수 있는 일은 똑같고(코드를 다시
+    # 받아오기), 구분해서 알려주면 아무 코드나 넣어보며 "이 코드는
+    # 있었네"를 알아내는 데 쓰일 수 있습니다.
+    if room is None:
+        await websocket.send_json(
+            {"type": "error", "message": "그런 방이 없습니다. 코드를 다시 확인해 주세요"}
+        )
+        await websocket.close(code=1008)
+        return
+
+    # 1:1 채팅이라 자리는 하나뿐입니다.
+    #
+    # 여기서 확인하고 바로 아래에서 자리를 채웁니다. 그 사이에 다른
+    # 처리를 기다리는(await) 지점을 두면 안 됩니다. 두 명이 거의 동시에
+    # 들어올 때 둘 다 "자리 비었네"를 보고 통과해 버립니다.
+    if room.guest is not None:
+        await websocket.send_json(
+            {"type": "error", "message": "방이 꽉 찼습니다"}
+        )
+        await websocket.close(code=1008)
+        return
+
+    room.guest = websocket
+    room.guest_nickname = guest_nickname
+
+    # 두 명이 다 모였으니 더 이상 들어올 수 없는 상태로 바꿉니다.
+    await run_in_threadpool(set_room_status, code, "playing")
+
+    # 들어온 사람에게: 어디에 들어왔는지 알려줍니다.
+    await websocket.send_json(
+        {
+            "type": "joined",
+            "code": code,
+            "host_nickname": room.host_nickname,
+            "guest_nickname": guest_nickname,
+        }
+    )
+
+    # 방장에게: **요청하지도 않았는데** 소식이 갑니다.
+    # 이게 웹소켓으로 만든 이유 그 자체입니다. HTTP 였다면 방장은
+    # "혹시 들어왔나요?"를 계속 물어봐야 했을 것입니다.
+    await send_quietly(
+        room.host, {"type": "guest_joined", "nickname": guest_nickname}
+    )
+
+    try:
+        while True:
+            await websocket.receive_text()
+            await websocket.send_json(
+                {"type": "error", "message": "채팅은 아직 만들어지지 않았습니다"}
+            )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        # 방장이 먼저 나가서 방이 이미 정리됐다면 여기서 할 일이 없습니다.
+        # 확인하지 않으면, 끝난 방을 되살려 `waiting` 으로 되돌려 놓는
+        # 사고가 납니다.
+        if live_rooms.get(code) is room and room.guest is websocket:
+            room.guest = None
+            room.guest_nickname = None
+            # 자리가 다시 비었으니 방장은 새 친구를 기다릴 수 있습니다.
+            await run_in_threadpool(set_room_status, code, "waiting")
+            await send_quietly(
+                room.host, {"type": "guest_left", "nickname": guest_nickname}
+            )
 
 
 # ─────────────────────────────────────────────────────────────

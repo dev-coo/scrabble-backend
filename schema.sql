@@ -27,24 +27,32 @@ CREATE TABLE IF NOT EXISTS players (
 -- rooms — 게임을 시작하기 전에 사람들이 모이는 "방"
 --
 -- 컬럼을 이렇게 정한 이유:
---   name        방 목록 화면에 뭐라고 표시할지. 이름이 없으면
---               사용자가 어느 방에 들어갈지 고를 수 없습니다.
---   max_players 정원. 입장 API에서 "꽉 찼습니다"를 판단하려면
---               방마다 정원이 저장돼 있어야 합니다.
---   status      방의 현재 상태. 이미 게임이 시작된 방에 새로
---               들어오면 안 되므로 구분이 필요합니다.
---   created_at  만들어진 시각. 방 목록을 최신순으로 정렬할 때 씁니다.
+--   code          친구에게 알려주는 초대 코드. 이걸로 방을 찾아
+--                 들어옵니다. 방마다 서로 달라야 하므로 아래에
+--                 "중복 금지" 규칙을 걸어 둡니다.
+--   host_nickname 방을 만든 사람. 방장은 방마다 딱 한 명이라
+--                 컬럼 하나로 충분합니다.
+--   name          방 목록 화면에 뭐라고 표시할지. 이름이 없으면
+--                 사용자가 어느 방에 들어갈지 고를 수 없습니다.
+--   max_players   정원. 입장 API에서 "꽉 찼습니다"를 판단하려면
+--                 방마다 정원이 저장돼 있어야 합니다.
+--   status        방의 현재 상태. 이미 게임이 시작된 방에 새로
+--                 들어오면 안 되므로 구분이 필요합니다.
+--   created_at    만들어진 시각. 방 목록을 최신순으로 정렬할 때 씁니다.
 --
 -- "누가 이 방에 들어와 있는가"는 여기 없습니다. 한 방에 여러 명이
 -- 들어오는데, 한 칸에 여러 명을 욱여넣을 수 없기 때문입니다.
 -- 그건 방 입장 기능을 만들 때 별도 테이블로 다룹니다.
+-- (host_nickname 은 "여러 명"이 아니라 "한 명"이라서 여기 둡니다.)
 -- ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS rooms (
-    id          serial PRIMARY KEY,
-    name        text NOT NULL,
-    max_players integer NOT NULL DEFAULT 4,
-    status      text NOT NULL DEFAULT 'waiting',
-    created_at  timestamp NOT NULL DEFAULT now(),
+    id            serial PRIMARY KEY,
+    code          text NOT NULL,
+    host_nickname text NOT NULL,
+    name          text NOT NULL,
+    max_players   integer NOT NULL DEFAULT 4,
+    status        text NOT NULL DEFAULT 'waiting',
+    created_at    timestamp NOT NULL DEFAULT now(),
 
     -- CHECK 는 "이 조건에 안 맞는 값은 아예 저장하지 마라"는 DB의 규칙입니다.
     -- 백엔드 코드에서도 검사하지만, DB에도 걸어 두면 코드에 실수가 있어도
@@ -70,3 +78,45 @@ CREATE TABLE IF NOT EXISTS rooms (
 -- 인덱스는 책의 색인 같은 것으로, 그 조건으로 찾을 때 빨라집니다.
 CREATE INDEX IF NOT EXISTS rooms_status_created_at_idx
     ON rooms (status, created_at DESC);
+
+
+-- ─────────────────────────────────────────────────────────────
+-- rooms 변경 이력 — 이미 만들어져 있는 DB 를 따라오게 하기
+--
+-- 위의 CREATE TABLE 은 "테이블이 아예 없을 때"만 동작합니다. 이미
+-- rooms 를 만들어 둔 사람의 DB 에는 새 컬럼이 생기지 않습니다.
+-- 그래서 아래 문장들이 필요합니다.
+--
+-- 결과적으로 두 경우가 똑같아집니다:
+--   새로 만드는 사람  → CREATE TABLE 로 생기고, 아래는 전부 건너뜀
+--   이미 있는 사람    → 아래 문장으로 따라옴
+-- ─────────────────────────────────────────────────────────────
+
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS code          text;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS host_nickname text;
+
+-- "비어 있으면 안 된다"를 뒤늦게 거는 것이라, 이미 빈 값이 든 행이
+-- 있으면 여기서 에러가 납니다. 그건 조용히 넘어가면 안 되는 상황이라
+-- 일부러 막지 않았습니다. (지금 rooms 는 비어 있어서 문제없습니다)
+ALTER TABLE rooms ALTER COLUMN code          SET NOT NULL;
+ALTER TABLE rooms ALTER COLUMN host_nickname SET NOT NULL;
+
+-- 초대 코드는 방마다 달라야 합니다. 코드가 겹치면 친구가 엉뚱한 방에
+-- 들어가게 됩니다. 백엔드도 겹치지 않게 만들지만, DB 에도 걸어 둡니다.
+CREATE UNIQUE INDEX IF NOT EXISTS rooms_code_key ON rooms (code);
+
+-- 코드 모양 규칙: 대문자·숫자 6자리.
+-- 헷갈리는 글자(O·0, I·1, L)는 아예 쓰지 않습니다. 친구에게 코드를
+-- 불러줄 때 "영어 오야, 숫자 영이야?"를 묻지 않아도 되게 하려는 것입니다.
+--
+-- DROP 후 ADD 하는 이유: ADD CONSTRAINT 에는 IF NOT EXISTS 가 없어서
+-- 두 번 실행하면 에러가 납니다. 먼저 지우고 다시 걸면 몇 번을 실행해도
+-- 안전합니다.
+ALTER TABLE rooms DROP CONSTRAINT IF EXISTS rooms_code_valid;
+ALTER TABLE rooms ADD  CONSTRAINT rooms_code_valid
+    CHECK (code ~ '^[A-HJKMNP-Z2-9]{6}$');
+
+-- 방장 닉네임: 플레이어 닉네임과 같은 규칙 (공백만 금지, 1~20자)
+ALTER TABLE rooms DROP CONSTRAINT IF EXISTS rooms_host_nickname_valid;
+ALTER TABLE rooms ADD  CONSTRAINT rooms_host_nickname_valid
+    CHECK (length(trim(host_nickname)) BETWEEN 1 AND 20);

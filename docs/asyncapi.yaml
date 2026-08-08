@@ -22,8 +22,18 @@ info:
     실시간 통로입니다. HTTP API 와 달리 **연결이 계속 이어져 있어서
     백엔드가 먼저 말을 걸 수 있습니다.**
 
-    현재 범위는 **연결 확인용 통로 하나**까지입니다.
-    여러 사람에게 알리기 · 방 구분 · 접속자 식별은 아직 없습니다.
+    통로가 세 개 있습니다.
+
+    - `/ws` — 연결이 되는지 확인만 하는 통로 (메아리)
+    - `/ws/rooms` — **방을 만들고 친구를 기다리는 통로** (방장이 씀)
+    - `/ws/rooms/{code}` — **코드로 그 방에 들어가는 통로** (친구가 씀)
+
+    채팅은 **1:1** 입니다. 방장이 `/ws/rooms` 에 접속하면 방이 만들어지고
+    초대 코드를 받습니다. 친구가 그 코드로 `/ws/rooms/{code}` 에 접속하면
+    **방장에게 "들어왔다"는 소식이 갑니다.**
+
+    자리가 있는 그대로 하나뿐이라 세 번째 사람은 들어올 수 없습니다.
+    메시지를 주고받는 **채팅 자체는 아직 없습니다.**
 
 servers:
   local:
@@ -46,6 +56,69 @@ channels:
       clientText:
         $ref: '#/components/messages/clientText'
 
+  rooms:
+    address: /ws/rooms
+    title: 방 만들고 기다리기
+    description: |
+      접속하는 **그 순간 방이 만들어지고**, 초대 코드가 바로 날아옵니다.
+      그 뒤로 연결은 끊지 말고 **그대로 두세요.** 그게 "친구를 기다리는
+      상태"입니다. 끊으면 방도 같이 없어집니다.
+
+      닉네임은 주소 뒤에 붙여 보냅니다.
+      예: `ws://localhost:11000/ws/rooms?nickname=수진`
+    bindings:
+      ws:
+        query:
+          type: object
+          required: [nickname]
+          properties:
+            nickname:
+              type: string
+              description: 방을 만드는 사람의 닉네임. 공백 제거 후 1~20자.
+              examples: [수진]
+    messages:
+      roomCreated:
+        $ref: '#/components/messages/roomCreated'
+      guestJoined:
+        $ref: '#/components/messages/guestJoined'
+      guestLeft:
+        $ref: '#/components/messages/guestLeft'
+      roomError:
+        $ref: '#/components/messages/roomError'
+
+  join:
+    address: /ws/rooms/{code}
+    title: 코드로 방에 들어가기
+    description: |
+      친구에게 받은 초대 코드로 그 방에 들어갑니다.
+      들어가는 데 성공하면 **방장에게도 알림이 갑니다.**
+
+      주소의 `{code}` 자리에 코드를 넣고, 닉네임은 물음표 뒤에 붙입니다.
+      예: `ws://localhost:11000/ws/rooms/DQDZ3Z?nickname=엘리`
+
+      **소문자로 쳐도 됩니다.** 서버가 대문자로 맞춰줍니다.
+    parameters:
+      code:
+        description: 방장에게 받은 초대 코드. 대문자·숫자 6자리.
+        examples: [DQDZ3Z]
+    bindings:
+      ws:
+        query:
+          type: object
+          required: [nickname]
+          properties:
+            nickname:
+              type: string
+              description: 들어가는 사람의 닉네임. 공백 제거 후 1~20자.
+              examples: [엘리]
+    messages:
+      joined:
+        $ref: '#/components/messages/joined'
+      hostLeft:
+        $ref: '#/components/messages/hostLeft'
+      joinError:
+        $ref: '#/components/messages/joinError'
+
 operations:
   sendToClient:
     action: send
@@ -65,6 +138,31 @@ operations:
     description: 지금은 형식이 정해져 있지 않습니다. 아무 문자열이나 보내면 됩니다.
     messages:
       - $ref: '#/channels/ws/messages/clientText'
+
+  sendRoomCreated:
+    action: send
+    channel:
+      $ref: '#/channels/rooms'
+    title: 백엔드 → 프론트엔드 (방장이 받는 것)
+    description: |
+      접속 직후 방이 만들어지면 코드를 보냅니다. 그 뒤로는 **방장이
+      요청하지 않아도** 친구가 들어오고 나갈 때마다 소식이 옵니다.
+    messages:
+      - $ref: '#/channels/rooms/messages/roomCreated'
+      - $ref: '#/channels/rooms/messages/guestJoined'
+      - $ref: '#/channels/rooms/messages/guestLeft'
+      - $ref: '#/channels/rooms/messages/roomError'
+
+  sendJoined:
+    action: send
+    channel:
+      $ref: '#/channels/join'
+    title: 백엔드 → 프론트엔드 (들어간 사람이 받는 것)
+    description: 들어가는 데 성공했는지 알려주고, 방장이 나가면 그것도 알려줍니다.
+    messages:
+      - $ref: '#/channels/join/messages/joined'
+      - $ref: '#/channels/join/messages/hostLeft'
+      - $ref: '#/channels/join/messages/joinError'
 
 components:
   messages:
@@ -118,6 +216,226 @@ components:
             type: echo
             message: 안녕
 
+    roomCreated:
+      name: room_created
+      title: 방이 만들어짐
+      summary: 접속 직후 **바로** 옵니다. 여기 담긴 `code` 를 친구에게 알려주세요.
+      description: |
+        이걸 받은 뒤에는 **연결을 끊지 마세요.** 연결이 살아 있는 동안만
+        친구가 그 코드로 들어올 수 있습니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, code, name, host_nickname, max_players]
+        properties:
+          type:
+            type: string
+            const: room_created
+            description: 메시지 종류
+          code:
+            type: string
+            description: |
+              초대 코드. 대문자·숫자 6자리이며 `O` `I` `L` `0` `1` 은 나오지 않습니다.
+              (불러줄 때 헷갈리지 않게 하려고 뺐습니다)
+          name:
+            type: string
+            description: 자동으로 지어진 방 이름 (`OO님의 방`)
+          host_nickname:
+            type: string
+            description: 방장 닉네임 (앞뒤 공백이 정리된 최종 값)
+          max_players:
+            type: integer
+            description: 정원. 지금은 항상 4
+      examples:
+        - name: 수진님이 방을 만들었을 때
+          payload:
+            type: room_created
+            code: DQDZ3Z
+            name: 수진님의 방
+            host_nickname: 수진
+            max_players: 4
+
+    guestJoined:
+      name: guest_joined
+      title: 친구가 들어옴
+      summary: 친구가 코드를 치고 들어왔을 때 **방장에게** 옵니다.
+      description: |
+        **방장이 요청하지 않았는데 오는 메시지입니다.** 이 기능을 웹소켓으로
+        만든 이유가 바로 이것입니다. HTTP 였다면 방장이 "혹시 들어왔나요?"를
+        계속 물어봐야 했습니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, nickname]
+        properties:
+          type:
+            type: string
+            const: guest_joined
+            description: 메시지 종류
+          nickname:
+            type: string
+            description: 들어온 사람의 닉네임
+      examples:
+        - name: 엘리가 들어왔을 때
+          payload:
+            type: guest_joined
+            nickname: 엘리
+
+    guestLeft:
+      name: guest_left
+      title: 친구가 나감
+      summary: 들어와 있던 친구가 연결을 끊었을 때 **방장에게** 옵니다.
+      description: |
+        자리가 다시 비므로, **같은 코드로 다른 사람이 들어올 수 있습니다.**
+        방장의 연결은 그대로 살아 있습니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, nickname]
+        properties:
+          type:
+            type: string
+            const: guest_left
+            description: 메시지 종류
+          nickname:
+            type: string
+            description: 나간 사람의 닉네임
+      examples:
+        - name: 엘리가 나갔을 때
+          payload:
+            type: guest_left
+            nickname: 엘리
+
+    joined:
+      name: joined
+      title: 방에 들어감
+      summary: 코드가 맞고 자리가 있으면 **바로** 옵니다.
+      description: |
+        이걸 받으면 두 명이 다 모인 것입니다. 연결을 끊지 마세요.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, code, host_nickname, guest_nickname]
+        properties:
+          type:
+            type: string
+            const: joined
+            description: 메시지 종류
+          code:
+            type: string
+            description: 들어간 방의 코드 (대문자로 맞춰진 값)
+          host_nickname:
+            type: string
+            description: 방장 닉네임. 화면에 "OO님과의 대화"처럼 띄우는 데 씁니다
+          guest_nickname:
+            type: string
+            description: 내 닉네임 (앞뒤 공백이 정리된 최종 값)
+      examples:
+        - name: 엘리가 수진님의 방에 들어갔을 때
+          payload:
+            type: joined
+            code: DQDZ3Z
+            host_nickname: 수진
+            guest_nickname: 엘리
+
+    hostLeft:
+      name: host_left
+      title: 방장이 나감
+      summary: 방장이 연결을 끊었을 때 **들어와 있던 사람에게** 옵니다.
+      description: |
+        1:1 대화라 방장이 나가면 대화가 성립하지 않습니다. 이 메시지를
+        받은 **직후 연결도 함께 닫힙니다.** (닫는 코드 `1001`)
+
+        그 코드는 이제 죽었습니다. 다시 들어가려면 **새 코드를 받아야** 합니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, message]
+        properties:
+          type:
+            type: string
+            const: host_left
+            description: 메시지 종류
+          message:
+            type: string
+            description: 사람이 읽는 안내 문구
+      examples:
+        - name: 방장이 탭을 닫았을 때
+          payload:
+            type: host_left
+            message: 방장이 나갔습니다
+
+    joinError:
+      name: error
+      title: 들어가지 못함
+      summary: 코드가 틀렸거나 자리가 없을 때 옵니다. 보낸 뒤 연결이 끊깁니다.
+      description: |
+        이 메시지를 받으면 **곧 연결이 끊깁니다.** (끊는 코드 `1008`)
+
+        `message` 로 오는 것들:
+
+        - `그런 방이 없습니다. 코드를 다시 확인해 주세요`
+          — 없는 코드이거나, 방장이 이미 나간 코드입니다.
+          **두 경우를 구분해서 알려주지 않습니다.** 친구가 할 수 있는 일은
+          어느 쪽이든 똑같고(코드를 다시 받기), 구분해 주면 아무 코드나
+          넣어보며 "이 코드는 있었네"를 알아내는 데 쓰일 수 있습니다.
+        - `방이 꽉 찼습니다` — 이미 두 명이 모여 있습니다.
+        - 닉네임 규칙 위반 메시지 — 방 만들 때와 같습니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, message]
+        properties:
+          type:
+            type: string
+            const: error
+            description: 메시지 종류
+          message:
+            type: string
+            description: 사람이 읽는 이유
+      examples:
+        - name: 없는 코드
+          payload:
+            type: error
+            message: 그런 방이 없습니다. 코드를 다시 확인해 주세요
+        - name: 자리가 없음
+          payload:
+            type: error
+            message: 방이 꽉 찼습니다
+
+    roomError:
+      name: error
+      title: 잘못됐거나 아직 안 되는 일
+      summary: 닉네임이 규칙에 안 맞거나, 아직 없는 기능을 쓰려 할 때 옵니다.
+      description: |
+        **닉네임이 잘못된 경우** — 이 메시지를 보낸 뒤 서버가 연결을 끊습니다.
+        (끊는 코드 `1008` = "규칙에 안 맞아서 끊음")
+
+        **말을 건 경우** — 채팅은 아직 없습니다. 연결은 그대로 두고
+        안내만 보냅니다. 조용히 무시하면 프론트엔드가 메시지가 갔다고
+        착각하기 때문에 일부러 알려줍니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, message]
+        properties:
+          type:
+            type: string
+            const: error
+            description: 메시지 종류
+          message:
+            type: string
+            description: 사람이 읽는 이유
+      examples:
+        - name: 닉네임이 비었을 때 (곧 끊김)
+          payload:
+            type: error
+            message: 닉네임은 비어 있을 수 없습니다
+        - name: 말을 걸었을 때 (안 끊김)
+          payload:
+            type: error
+            message: 채팅은 아직 만들어지지 않았습니다
+
     clientText:
       name: clientText
       title: 아무 문자열
@@ -151,15 +469,19 @@ components:
 #   끊기면 프론트엔드가 직접 다시 연결해야 합니다. (ws.onclose)
 # ─────────────────────────────────────────────────────────────
 x-not-implemented-yet:
-  - 여러 사람에게 동시에 알리기 (브로드캐스트)
-  - 방 구분 (누가 어느 방에 있는지)
-  - 누가 연결했는지 식별 (닉네임·플레이어 id)
-  - 연결이 끊긴 사람 정리
+  - 채팅 메시지 주고받기 ← 다음 차례
+  - 지난 대화 내용 저장 (지금은 아무것도 남지 않음)
+  - 방장과 친구가 **같은 닉네임**이어도 막지 않음 (대화가 헷갈릴 수 있음)
+  - 끊긴 뒤 같은 방으로 다시 들어가기 (재접속)
 
 x-disconnect:
-  - 상황: 브라우저 탭·창을 닫음
-    결과: 정상 종료. 서버는 에러로 보지 않습니다.
+  - 상황: 방장이 나감
+    결과: 들어와 있던 친구는 host_left 를 받고 **함께 끊깁니다(1001).** 방은 finished 가 되어 그 코드는 영영 죽습니다.
+  - 상황: 들어와 있던 친구가 나감
+    결과: 방장에게 guest_left 가 갑니다. 방은 다시 waiting 이 되어 **같은 코드로 다른 사람이 들어올 수 있습니다.**
   - 상황: 서버를 껐다 켬 (--reload 포함)
-    결과: 연결이 끊깁니다. 자동으로 다시 연결되지 않습니다.
+    결과: 모든 연결이 끊기고, 살아 있던 방은 전부 무효가 됩니다.
   - 상황: 네트워크가 끊김
-    결과: 연결이 끊깁니다.
+    결과: 그 사람이 스스로 나간 것과 같게 처리됩니다.
+  - 상황: 닉네임이 규칙에 안 맞거나 코드가 틀림
+    결과: error 메시지를 받은 뒤 코드 1008 로 끊깁니다. 방은 만들어지지도, 들어가지지도 않습니다.

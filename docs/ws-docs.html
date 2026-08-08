@@ -103,10 +103,14 @@
   /* 직접 해보기 */
   .try { border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: var(--card); }
   .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-  input[type=text] {
+  input[type=text], select {
     flex: 1; min-width: 180px; padding: 8px 10px; border-radius: 6px;
     border: 1px solid var(--line); background: var(--bg); color: var(--fg);
     font-family: inherit; font-size: 14px;
+  }
+  .op {
+    font-size: 13px; font-weight: 700; color: var(--muted);
+    margin: 22px 0 8px; text-transform: none;
   }
   button {
     padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line);
@@ -224,21 +228,99 @@ function renderMessage(msg, direction) {
 
 function renderOperation(op) {
   const msgs = (op.messages || []).map((m) => renderMessage(m, op.action)).join("");
-  return `<h2>${esc(op.title || op.action)}</h2>${para(op.description)}${msgs}`;
+  return `<p class="op">${esc(op.title || op.action)}</p>${para(op.description)}${msgs}`;
+}
+
+// 통로에 따라서는 주소 뒤에 값을 붙여 보내야 합니다 (?nickname=수진).
+// 명세의 bindings.ws.query 에 그 규칙이 적혀 있습니다.
+function channelQuery(channel) {
+  const ws = (channel.bindings || {}).ws || {};
+  const q = ws.query;
+  return (q && q.properties) ? q : null;
+}
+
+// 주소 한가운데 들어가는 값입니다 (/ws/rooms/{code}).
+// 물음표 뒤에 붙는 값과 달리 자리가 정해져 있습니다.
+function renderParams(channel) {
+  const params = channel.parameters;
+  if (!params) return "";
+  const rows = Object.entries(params).map(([key, p]) => `<tr>
+      <td><code>{${esc(key)}}</code></td>
+      <td>${fmt(p.description || "")}</td>
+    </tr>`).join("");
+  return `<div class="label">주소 안에 넣는 값</div>
+    <table><thead><tr><th>자리</th><th>설명</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+function renderQuery(channel) {
+  const q = channelQuery(channel);
+  if (!q) return "";
+  const required = q.required || [];
+  const rows = Object.entries(q.properties).map(([key, p]) => `<tr>
+      <td><code>${esc(key)}</code>${required.includes(key) ? ' <span class="req">*</span>' : ""}</td>
+      <td>${esc(p.type || "")}</td>
+      <td>${fmt(p.description || "")}</td>
+    </tr>`).join("");
+  return `<div class="label">주소 뒤에 붙여 보내는 값</div>
+    <table><thead><tr><th>이름</th><th>타입</th><th>설명</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+// 바로 눌러볼 수 있도록 예시 값까지 채운 주소를 만듭니다.
+function sampleUrl(server, channel) {
+  let address = channel.address || "";
+  // {code} 같은 자리는 예시 값으로 바꿔둡니다. 그래야 "직접 해보기"에서
+  // 주소를 그대로 눌러 연결해 볼 수 있습니다.
+  for (const [key, p] of Object.entries(channel.parameters || {})) {
+    const sample = (p.examples && p.examples[0]) || key;
+    address = address.split(`{${key}}`).join(sample);
+  }
+  const base = `${server.protocol || "ws"}://${server.host || location.host}${address}`;
+  const q = channelQuery(channel);
+  if (!q) return base;
+  const parts = Object.entries(q.properties).map(([key, p]) => {
+    const sample = (p.examples && p.examples[0]) || "값";
+    return `${key}=${encodeURIComponent(sample)}`;
+  });
+  return parts.length ? `${base}?${parts.join("&")}` : base;
+}
+
+function renderChannel(channel, ops, server) {
+  return `<h2>${esc(channel.title || channel.address || "")}</h2>
+    <div class="srv">
+      <div class="url mono">${esc(sampleUrl(server, channel))}</div>
+      <div class="why">${esc(server.description || "")}</div>
+    </div>
+    ${para(channel.description)}
+    ${renderParams(channel)}
+    ${renderQuery(channel)}
+    ${ops.map(renderOperation).join("")}`;
 }
 
 function render(spec) {
   const d = (n) => deref(n, spec);
   const info = spec.info || {};
   const server = d(Object.values(spec.servers || {})[0]) || {};
-  const channel = d(Object.values(spec.channels || {})[0]) || {};
-  const url = `${server.protocol || "ws"}://${server.host || location.host}${channel.address || ""}`;
-  const ops = Object.values(spec.operations || {}).map(d);
 
+  // 어떤 오퍼레이션이 어느 통로 것인지 갈라둡니다. $ref 를 풀어버리면
+  // "어느 통로였는지"를 알 수 없게 되므로, 풀기 전에 먼저 봅니다.
+  const opsByChannel = {};
+  for (const rawOp of Object.values(spec.operations || {})) {
+    const ref = (rawOp.channel && rawOp.channel.$ref) || "";
+    const key = ref.split("/").pop();
+    (opsByChannel[key] = opsByChannel[key] || []).push(d(rawOp));
+  }
+
+  const channels = Object.entries(spec.channels || {})
+    .map(([key, ch]) => ({ key, ch: d(ch), ops: opsByChannel[key] || [] }));
+
+  // 여기도 fmt 을 씁니다. esc 만 쓰면 명세에 적힌 **굵게** 가 별표
+  // 그대로 화면에 나옵니다.
   const notYet = (spec["x-not-implemented-yet"] || [])
-    .map((s) => `<li>${esc(s)}</li>`).join("");
+    .map((s) => `<li>${fmt(s)}</li>`).join("");
   const disconnect = (spec["x-disconnect"] || []).map((r) =>
-    `<tr><td>${esc(r["상황"])}</td><td>${esc(r["결과"])}</td></tr>`).join("");
+    `<tr><td>${fmt(r["상황"])}</td><td>${fmt(r["결과"])}</td></tr>`).join("");
 
   document.getElementById("app").innerHTML = `
     <header>
@@ -254,21 +336,21 @@ function render(spec) {
       (원본: <a href="/asyncapi.yaml">/asyncapi.yaml</a>)
     </div>
 
-    <h2>접속 주소</h2>
-    <div class="srv">
-      <div class="url mono">${esc(url)}</div>
-      <div class="why">${esc(server.description || "")}</div>
-      ${para(channel.description)}
-    </div>
-
-    ${ops.map(renderOperation).join("")}
+    ${channels.map(({ ch, ops }) => renderChannel(ch, ops, server)).join("")}
 
     <h2>직접 해보기</h2>
     <p class="empty">스와거의 “Try it out” 처럼, 여기서 바로 연결해 볼 수 있습니다.</p>
     <div class="try">
       <div class="status"><span class="dot" id="dot"></span><span id="state">연결 안 됨</span></div>
       <div class="row">
-        <input type="text" id="url" value="${esc(url)}">
+        <select id="chan">
+          ${channels.map(({ ch }, i) =>
+            `<option value="${esc(sampleUrl(server, ch))}"${i === 0 ? " selected" : ""}>${esc(ch.title || ch.address)}</option>`
+          ).join("")}
+        </select>
+      </div>
+      <div class="row">
+        <input type="text" id="url" value="${esc(sampleUrl(server, channels[0] ? channels[0].ch : {}))}">
         <button class="primary" id="conn">연결</button>
         <button id="disc" disabled>끊기</button>
       </div>
@@ -340,6 +422,10 @@ function wireTryIt() {
   };
 
   $("disc").onclick = () => ws && ws.close();
+
+  // 통로를 고르면 주소 칸을 바꿔줍니다. 주소는 직접 고쳐도 됩니다.
+  // (닉네임을 바꿔서 연결해 보려면 그렇게 하세요)
+  $("chan").onchange = (e) => { $("url").value = e.target.value; };
 
   function send() {
     const text = $("text").value;
