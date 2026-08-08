@@ -12,11 +12,11 @@
 #   - API 계약서  : http://100.115.173.118:11000/openapi.json
 # ─────────────────────────────────────────────────────────────
 from datetime import datetime
-from typing import List
+from typing import Annotated, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 
 from db import get_connection
 
@@ -55,26 +55,35 @@ def hello():
 # "모양"을 아래 두 클래스로 미리 정해 둡니다. 이 모양이 곧 계약이고,
 # FastAPI가 이걸 읽어서 /docs 문서와 /openapi.json 을 자동으로 만듭니다.
 # ─────────────────────────────────────────────────────────────
+def clean_nickname(value: str) -> str:
+    """닉네임의 앞뒤 공백을 정리하고 규칙에 맞는지 검사합니다.
+
+    이 함수 하나를 POST·PUT(보내는 값)과 중복 확인(주소 뒤 물음표로 오는 값)이
+    **함께** 씁니다. 규칙이 여러 군데로 갈라지면 나중에 한쪽만 고쳐서
+    서로 다르게 동작하는 사고가 납니다.
+    """
+    # 앞뒤 공백은 실수로 들어오기 쉬우니 백엔드가 정리해 줍니다.
+    value = value.strip()
+    if not value:
+        raise ValueError("닉네임은 비어 있을 수 없습니다")
+    if len(value) > 20:
+        raise ValueError("닉네임은 20자 이하여야 합니다")
+    return value
+
+
 class NicknameBody(BaseModel):
     """닉네임을 담아 보내는 값의 모양 + 검사 규칙.
 
     추가(POST)와 수정(PUT)이 **똑같은 규칙**을 써야 하므로 여기 한 번만
-    적어 두고 아래 두 클래스가 이어받습니다. 규칙이 두 군데로 갈라지면
-    나중에 한쪽만 고쳐서 서로 다르게 동작하는 사고가 납니다.
+    적어 두고 아래 두 클래스가 이어받습니다.
     """
 
     nickname: str = Field(..., description="플레이어 닉네임", examples=["수진"])
 
     @field_validator("nickname")
     @classmethod
-    def clean_nickname(cls, value: str) -> str:
-        # 앞뒤 공백은 실수로 들어오기 쉬우니 백엔드가 정리해 줍니다.
-        value = value.strip()
-        if not value:
-            raise ValueError("닉네임은 비어 있을 수 없습니다")
-        if len(value) > 20:
-            raise ValueError("닉네임은 20자 이하여야 합니다")
-        return value
+    def _clean(cls, value: str) -> str:
+        return clean_nickname(value)
 
 
 class PlayerCreate(NicknameBody):
@@ -131,6 +140,59 @@ def list_players():
             rows = cur.fetchall()
 
     return [PlayerOut(id=r[0], nickname=r[1], created_at=r[2]) for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────
+# 닉네임 중복 확인 API
+#
+# 프론트엔드가 "이 닉네임 쓸 수 있나요?"를 물어보는 API입니다.
+# 저장(POST)하기 전에 미리 물어봐서, 사용자가 입력하는 도중에
+# "이미 사용 중인 닉네임입니다"를 띄울 수 있게 해 줍니다.
+#
+# 주소 뒤에 `?nickname=수진` 처럼 붙여 보냅니다. 이렇게 물음표 뒤에
+# 붙이는 값을 "쿼리 파라미터"라고 부릅니다. GET 은 보낼 값(body)을
+# 쓰지 않는 게 관례라서, 조회 조건은 주소에 실어 보냅니다.
+# ─────────────────────────────────────────────────────────────
+class NicknameCheckOut(BaseModel):
+    """백엔드 → 프론트엔드, 중복 확인 결과."""
+
+    nickname: str = Field(..., description="공백이 정리된 최종 닉네임")
+    exists: bool = Field(..., description="True면 이미 쓰는 사람이 있음")
+
+
+@app.get("/api/players/check-nickname", response_model=NicknameCheckOut)
+def check_nickname(
+    nickname: Annotated[
+        str,
+        AfterValidator(clean_nickname),  # POST·PUT 과 똑같은 규칙을 적용
+        Query(description="확인할 닉네임", examples=["수진"]),
+    ],
+):
+    """닉네임이 이미 쓰이고 있는지 알려줍니다.
+
+    이 API 는 **알려주기만 하고 아무것도 저장하지 않습니다.** 조회만 하는
+    기능이라 GET 을 씁니다.
+
+    없는 닉네임이어도 404 가 아니라 200 입니다. "찾는 게 없다"가 곧
+    이 API 가 듣고 싶어 하는 정답 중 하나이기 때문입니다.
+    (`exists: false` = 쓸 수 있음)
+
+    ⚠️ 확인 시점과 저장 시점 사이에 다른 사람이 같은 닉네임을 먼저
+    저장할 수 있습니다. 이 API 만으로는 중복을 완전히 막지 못합니다.
+    확실히 막으려면 DB 테이블에 "같은 닉네임 금지" 제약을 거는
+    **별도 작업**이 필요합니다.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            # 전부 가져와서 파이썬에서 세지 않고 DB에게 "있냐?"만 묻습니다.
+            # 데이터가 많아져도 빠르고, 주고받는 양도 적습니다.
+            cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM players WHERE nickname = %s)",
+                (nickname,),
+            )
+            exists = cur.fetchone()[0]
+
+    return NicknameCheckOut(nickname=nickname, exists=exists)
 
 
 @app.put("/api/players/{player_id}", response_model=PlayerOut)
