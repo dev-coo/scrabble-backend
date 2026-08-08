@@ -694,6 +694,9 @@ class Waiter:
         self.nickname = nickname
         self.room: Optional[LiveRoom] = None
         self.is_host = False
+        # 짝지어진 상대. 상대가 나갔을 때 **그 사람을 다시 줄 세워 주려면**
+        # 연결만이 아니라 이 사람 정보 전체가 필요합니다.
+        self.partner: Optional["Waiter"] = None
 
 
 # 짝을 기다리는 줄. 왼쪽이 가장 오래 기다린 사람입니다.
@@ -742,6 +745,68 @@ def context_of(me: Waiter):
     return me.room, partner
 
 
+async def pair_up(first: Waiter, second: Waiter) -> bool:
+    """두 사람을 한 방에 넣고 양쪽에 알립니다. 방을 못 만들면 `False`.
+
+    `first` 는 **더 오래 기다린 사람**이며 방장이 됩니다.
+    (방이 그 사람 이름으로 만들어집니다)
+    """
+    room = await run_in_threadpool(insert_room, first.nickname)
+    if room is None:
+        return False
+
+    code = room["code"]
+    live = LiveRoom(room["id"], code, first.websocket, first.nickname)
+    live.guest = second.websocket
+    live.guest_nickname = second.nickname
+    live_rooms[code] = live
+
+    # 양쪽 모두에게 "너는 이 방의 누구다"를 표시해 둡니다.
+    first.room = live
+    first.is_host = True
+    first.partner = second
+    second.room = live
+    second.is_host = False
+    second.partner = first
+
+    await run_in_threadpool(set_room_status, code, "playing")
+
+    # 기다리던 쪽에게는 **요청하지 않았는데** 오는 소식입니다.
+    await send_quietly(
+        first.websocket,
+        {"type": "matched", "code": code, "partner_nickname": second.nickname},
+    )
+    await send_quietly(
+        second.websocket,
+        {"type": "matched", "code": code, "partner_nickname": first.nickname},
+    )
+    return True
+
+
+async def join_queue(me: Waiter, front: bool = False) -> None:
+    """줄에 세우고 순번을 알려줍니다.
+
+    `front=True` 는 **맨 앞**에 세웁니다. 짝이 지어졌다가 상대가 나가서
+    다시 기다리게 된 사람에게 씁니다. 이미 한참 기다렸던 사람을 맨 뒤로
+    보내면 기다린 시간이 없던 일이 되기 때문입니다.
+    """
+    me.room = None
+    me.is_host = False
+    me.partner = None
+
+    if front:
+        match_queue.appendleft(me)
+        position = 1
+    else:
+        match_queue.append(me)
+        position = len(match_queue)
+
+    await send_quietly(
+        me.websocket,
+        {"type": "waiting", "position": position, "nickname": me.nickname},
+    )
+
+
 @app.websocket("/ws/match")
 async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
     """아무나 기다리는 사람과 짝지어 줍니다.
@@ -750,6 +815,10 @@ async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
 
     기다리는 사람이 있으면 **바로** 짝이 되고, 없으면 줄을 서서 다음
     사람이 올 때까지 기다립니다.
+
+    대화 중에 상대가 나가도 **연결은 끊기지 않습니다.** 서버가 알아서
+    다시 줄을 세워 주고, 기다리는 사람이 있으면 바로 새 짝을 붙여
+    줍니다. 기다렸던 시간을 없던 일로 만들지 않기 위해서입니다.
     """
     await websocket.accept()
 
@@ -764,47 +833,16 @@ async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
     partner = take_next_waiter()
 
     if partner is None:
-        # 아무도 없으면 내가 줄을 섭니다.
-        match_queue.append(me)
+        # 아무도 없으면 줄 맨 뒤에 섭니다.
+        await join_queue(me)
+    elif not await pair_up(partner, me):
         await websocket.send_json(
-            {"type": "waiting", "position": len(match_queue), "nickname": my_nickname}
+            {"type": "error", "message": "방을 만들지 못했습니다. 잠시 후 다시 시도해 주세요"}
         )
-    else:
-        # 먼저 기다린 사람이 방장이 됩니다. (그 사람 이름으로 방이 만들어집니다)
-        room = await run_in_threadpool(insert_room, partner.nickname)
-
-        if room is None:
-            await websocket.send_json(
-                {"type": "error", "message": "방을 만들지 못했습니다. 잠시 후 다시 시도해 주세요"}
-            )
-            await websocket.close(code=1011)
-            # 기다리던 사람은 잘못이 없으니 줄 맨 앞으로 되돌려 놓습니다.
-            match_queue.appendleft(partner)
-            return
-
-        code = room["code"]
-        live = LiveRoom(room["id"], code, partner.websocket, partner.nickname)
-        live.guest = websocket
-        live.guest_nickname = my_nickname
-        live_rooms[code] = live
-
-        # 양쪽 모두에게 "너는 이 방의 누구다"를 표시해 둡니다.
-        partner.room = live
-        partner.is_host = True
-        me.room = live
-        me.is_host = False
-
-        await run_in_threadpool(set_room_status, code, "playing")
-
-        # 기다리던 사람에게: **요청하지 않았는데** 오는 소식입니다.
-        await send_quietly(
-            partner.websocket,
-            {"type": "matched", "code": code, "partner_nickname": my_nickname},
-        )
-        # 방금 온 사람에게
-        await websocket.send_json(
-            {"type": "matched", "code": code, "partner_nickname": partner.nickname}
-        )
+        await websocket.close(code=1011)
+        # 기다리던 사람은 잘못이 없으니 줄 맨 앞으로 되돌려 놓습니다.
+        await join_queue(partner, front=True)
+        return
 
     try:
         # 기다리는 중이든 대화 중이든 같은 반복문입니다. 아직 짝이 없으면
@@ -823,20 +861,38 @@ async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
                 pass
         else:
             live = me.room
+            other = me.partner
+
             # 상대가 먼저 나가서 이미 정리됐다면 할 일이 없습니다.
             if live_rooms.get(live.code) is live:
                 live_rooms.pop(live.code, None)
-                other = partner_of(me)
-                await send_quietly(
-                    other,
-                    {"type": "partner_left", "nickname": my_nickname},
-                )
-                if other is not None:
-                    try:
-                        await other.close(code=1001)
-                    except Exception:
-                        pass
                 await run_in_threadpool(set_room_status, live.code, "finished")
+
+                if other is not None:
+                    await send_quietly(
+                        other.websocket,
+                        {"type": "partner_left", "nickname": my_nickname},
+                    )
+
+                    # 남은 사람의 연결은 **끊지 않습니다.** 그 사람은 잘못이
+                    # 없는데 처음부터 다시 접속하게 하면, 기다렸던 시간이
+                    # 없던 일이 되고 줄 맨 뒤로 밀립니다.
+                    if other.websocket.client_state is WebSocketState.CONNECTED:
+                        waiting_person = take_next_waiter()
+
+                        if waiting_person is None:
+                            # 기다리는 사람이 없으면 줄 맨 앞에 다시 세웁니다.
+                            await join_queue(other, front=True)
+                        elif not await pair_up(waiting_person, other):
+                            # 방을 못 만들었으면 둘 다 줄로 돌려보냅니다.
+                            await join_queue(waiting_person, front=True)
+                            await join_queue(other, front=True)
+                        # 짝이 지어졌으면 pair_up 이 양쪽에 알렸습니다.
+                    else:
+                        # 남은 사람도 이미 끊긴 상태였습니다. 그 사람의
+                        # 뒷정리는 그쪽 차례가 오면 알아서 돕니다.
+                        other.room = None
+                        other.partner = None
 
 
 @app.websocket("/ws/rooms/{code}")
