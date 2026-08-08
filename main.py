@@ -13,9 +13,10 @@
 # ─────────────────────────────────────────────────────────────
 import json
 import secrets
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Dict, List, Optional
+from typing import Annotated, Deque, Dict, List, Optional
 
 import yaml
 from psycopg import errors as pg_errors
@@ -24,6 +25,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import AfterValidator, BaseModel, Field, field_validator
+from starlette.websockets import WebSocketState
 
 from db import get_connection
 
@@ -611,6 +613,170 @@ async def host_room(websocket: WebSocket, nickname: str = Query(default="")):
                 pass
 
         await run_in_threadpool(set_room_status, code, "finished")
+
+
+# ─────────────────────────────────────────────────────────────
+# 랜덤 매칭 (웹소켓)
+#
+# 코드를 주고받는 대신, **아무나 기다리는 사람과 짝지어 줍니다.**
+#
+# 짝짓는 규칙은 "시간 순서" — 먼저 와서 기다린 사람이 먼저 짝을
+# 만납니다. 이런 줄서기를 선착순(FIFO, First In First Out)이라고
+# 부릅니다. 은행 번호표와 같습니다.
+#
+# 왜 "랜덤"인데 순서를 지키나: 누구와 짝이 될지는 알 수 없지만,
+# 기다린 순서까지 뒤죽박죽이면 **먼저 온 사람이 계속 밀려서** 영영
+# 짝을 못 만나는 일이 생깁니다. 그건 랜덤이 아니라 불공평한 것입니다.
+#
+# 짝이 지어진 뒤는 코드로 들어온 것과 **완전히 같습니다.** 같은 방,
+# 같은 채팅을 씁니다. 만나는 방법만 다를 뿐이라 새로 만들지 않았습니다.
+# ─────────────────────────────────────────────────────────────
+
+
+class Waiter:
+    """짝을 기다리는 사람 한 명.
+
+    `room` 이 `None` 이면 아직 기다리는 중, 값이 있으면 짝을 만난 것입니다.
+    이 값은 **나중에 온 사람이 채워 줍니다.** 기다리는 사람은 가만히
+    있어도 되고, 그래서 따로 깨우는 장치가 필요 없습니다.
+    """
+
+    def __init__(self, websocket: WebSocket, nickname: str):
+        self.websocket = websocket
+        self.nickname = nickname
+        self.room: Optional[LiveRoom] = None
+        self.is_host = False
+
+
+# 짝을 기다리는 줄. 왼쪽이 가장 오래 기다린 사람입니다.
+#
+# ⚠️ 이것도 `live_rooms` 와 마찬가지로 **서버 메모리에만** 있습니다.
+#    서버를 껐다 켜면 기다리던 사람들은 모두 사라집니다.
+match_queue: Deque[Waiter] = deque()
+
+
+def take_next_waiter() -> Optional[Waiter]:
+    """가장 오래 기다린 사람을 줄에서 꺼냅니다. 없으면 `None`.
+
+    이미 짝이 지어진 사람이 줄에 남아 있을 수 있어서(뒷정리가 늦어진
+    경우) 건너뜁니다. 확인 없이 꺼내면 이미 대화 중인 사람에게
+    또 짝을 붙여주는 사고가 납니다.
+    """
+    while match_queue:
+        candidate = match_queue.popleft()
+        if candidate.room is not None:
+            continue
+        # 방금 나간 사람이 아직 줄에 남아 있을 수 있습니다. 뒷정리는
+        # 그 사람 차례가 와야 도는데, 그 사이에 내가 꺼낼 수 있기
+        # 때문입니다. 끊긴 사람과 짝지으면 상대 없는 방이 됩니다.
+        if candidate.websocket.client_state is not WebSocketState.CONNECTED:
+            continue
+        return candidate
+    return None
+
+
+def partner_of(me: Waiter) -> Optional[WebSocket]:
+    """지금 내 상대가 누구인지 알려줍니다. 아직 짝이 없으면 `None`."""
+    if me.room is None:
+        return None
+    return me.room.guest if me.is_host else me.room.host
+
+
+@app.websocket("/ws/match")
+async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
+    """아무나 기다리는 사람과 짝지어 줍니다.
+
+    접속 주소 예: `ws://localhost:11000/ws/match?nickname=엘리`
+
+    기다리는 사람이 있으면 **바로** 짝이 되고, 없으면 줄을 서서 다음
+    사람이 올 때까지 기다립니다.
+    """
+    await websocket.accept()
+
+    try:
+        my_nickname = clean_nickname(nickname)
+    except ValueError as e:
+        await websocket.send_json({"type": "error", "message": str(e)})
+        await websocket.close(code=1008)
+        return
+
+    me = Waiter(websocket, my_nickname)
+    partner = take_next_waiter()
+
+    if partner is None:
+        # 아무도 없으면 내가 줄을 섭니다.
+        match_queue.append(me)
+        await websocket.send_json(
+            {"type": "waiting", "position": len(match_queue), "nickname": my_nickname}
+        )
+    else:
+        # 먼저 기다린 사람이 방장이 됩니다. (그 사람 이름으로 방이 만들어집니다)
+        room = await run_in_threadpool(insert_room, partner.nickname)
+
+        if room is None:
+            await websocket.send_json(
+                {"type": "error", "message": "방을 만들지 못했습니다. 잠시 후 다시 시도해 주세요"}
+            )
+            await websocket.close(code=1011)
+            # 기다리던 사람은 잘못이 없으니 줄 맨 앞으로 되돌려 놓습니다.
+            match_queue.appendleft(partner)
+            return
+
+        code = room["code"]
+        live = LiveRoom(code, partner.websocket, partner.nickname)
+        live.guest = websocket
+        live.guest_nickname = my_nickname
+        live_rooms[code] = live
+
+        # 양쪽 모두에게 "너는 이 방의 누구다"를 표시해 둡니다.
+        partner.room = live
+        partner.is_host = True
+        me.room = live
+        me.is_host = False
+
+        await run_in_threadpool(set_room_status, code, "playing")
+
+        # 기다리던 사람에게: **요청하지 않았는데** 오는 소식입니다.
+        await send_quietly(
+            partner.websocket,
+            {"type": "matched", "code": code, "partner_nickname": my_nickname},
+        )
+        # 방금 온 사람에게
+        await websocket.send_json(
+            {"type": "matched", "code": code, "partner_nickname": partner.nickname}
+        )
+
+    try:
+        # 기다리는 중이든 대화 중이든 같은 반복문입니다. 아직 짝이 없으면
+        # `partner_of` 가 None 을 주고, chat_loop 가 "상대가 아직
+        # 들어오지 않았습니다"라고 알려줍니다.
+        await chat_loop(websocket, my_nickname, lambda: partner_of(me))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if me.room is None:
+            # 아직 줄 서 있는 상태로 나갔습니다. 줄에서 빼지 않으면
+            # 다음 사람이 이미 없는 사람과 짝지어집니다.
+            try:
+                match_queue.remove(me)
+            except ValueError:
+                pass
+        else:
+            live = me.room
+            # 상대가 먼저 나가서 이미 정리됐다면 할 일이 없습니다.
+            if live_rooms.get(live.code) is live:
+                live_rooms.pop(live.code, None)
+                other = partner_of(me)
+                await send_quietly(
+                    other,
+                    {"type": "partner_left", "nickname": my_nickname},
+                )
+                if other is not None:
+                    try:
+                        await other.close(code=1001)
+                    except Exception:
+                        pass
+                await run_in_threadpool(set_room_status, live.code, "finished")
 
 
 @app.websocket("/ws/rooms/{code}")
