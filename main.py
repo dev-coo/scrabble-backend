@@ -513,6 +513,22 @@ class LiveRoom:
         self.host_score = 0
         self.guest_score = 0
 
+        # 게임이 끝났는가. 끝난 판에는 더 놓을 수 없습니다.
+        #
+        # `started` 를 False 로 되돌리지 않고 따로 두는 이유: 그러면
+        # "아직 시작 안 함"과 "이미 끝남"이 같은 상태가 되어, 끝난 판에
+        # 놓으려 할 때 "아직 시작되지 않았습니다"라는 엉뚱한 답을 하게
+        # 됩니다. 사용자는 방금 게임을 끝냈는데 말이죠.
+        self.finished = False
+
+        # 아무도 칩을 안 내고 넘어간 턴이 몇 번 이어졌는가.
+        #
+        # 낼 수 있는 단어가 없으면 서로 넘기기만 하다가 게임이 영영
+        # 안 끝납니다. 연속으로 쌓이면 끝냅니다.
+        # **누가 하나라도 놓으면 0으로 되돌아갑니다.** 연속이 아니면
+        # 세는 의미가 없기 때문입니다.
+        self.passes = 0
+
     @property
     def turn_nickname(self) -> Optional[str]:
         """지금 차례인 사람의 닉네임. **화면에 보여줄 때만** 씁니다.
@@ -540,6 +556,8 @@ class LiveRoom:
         self.guest_rack = []
         self.host_score = 0
         self.guest_score = 0
+        self.finished = False
+        self.passes = 0
         # 판도 비웁니다. 안 비우면 지난 판에 놓인 글자 위에서 새 게임이
         # 시작돼, 첫 수부터 "이미 글자가 있는 칸"이라고 막힙니다.
         self.board = new_board()
@@ -1140,6 +1158,188 @@ def score_move(words: List[dict], placed: List[tuple], used: List[str]) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────
+# 게임 끝내기
+#
+# 끝나는 길이 두 가지입니다.
+#   ① 정상 종료 — **가방이 비고, 누군가 손패를 다 썼을 때.**
+#      더 뽑을 것도 없고 낼 것도 없으면 게임이 계속될 수 없습니다.
+#   ② 나가기(기권) — 한 사람이 그만두겠다고 누를 때.
+#
+# 어떻게 끝나든 **승패는 쌓아온 점수만으로** 가립니다.
+#
+# 손에 남은 칩으로 점수를 깎는 정산은 **하지 않습니다.** 원래 스크래블에는
+# 있는 규칙이지만, 이 프로젝트에서는 빼기로 정했습니다. 점수판에 보이던
+# 숫자가 마지막에 갑자기 달라지지 않아서, 보고 있던 대로 승패가 납니다.
+#
+# 나가기만 예외입니다. 점수와 상관없이 **남은 사람이 이깁니다.**
+# 그만둔 사람을 이기게 하면 지고 있을 때 나가버리는 게 이득이 됩니다.
+#
+# ⚠️ 연결을 그냥 끊는 것과는 다릅니다. 탭을 닫으면 지금까지처럼
+#    `host_left`/`guest_left`/`partner_left` 가 가고 방이 정리됩니다.
+#    나가기는 **연결을 유지한 채** 결과를 보고 다시 할 수 있게 합니다.
+# ─────────────────────────────────────────────────────────────
+
+
+def winner_by_score(room: LiveRoom) -> Optional[bool]:
+    """쌓아온 점수로 이긴 쪽을 가립니다. `True` 방장 · `False` 친구 · `None` 비김.
+
+    **손에 남은 칩은 보지 않습니다.** 점수판에 보이던 숫자가 그대로
+    결과가 되므로, 마지막에 순위가 갑자기 뒤집히는 일이 없습니다.
+
+    닉네임이 아니라 자리로 돌려주는 이유는 차례와 같습니다 — 두 사람
+    이름이 같으면 닉네임만으로는 누가 이겼는지 알 수 없습니다.
+    """
+    if room.host_score > room.guest_score:
+        return True
+    if room.guest_score > room.host_score:
+        return False
+    return None
+
+
+def record_end(code: str, kind: str, winner: Optional[str], host_score: int, guest_score: int):
+    """끝난 판을 DB 에 기록하고, **DB 가 찍은 시각**을 돌려줍니다."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE rooms SET ended_at = now(), end_kind = %s, winner = %s,"
+                " host_score = %s, guest_score = %s, status = 'finished'"
+                " WHERE code = %s RETURNING ended_at",
+                (kind, winner, host_score, guest_score, code),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+async def end_game(
+    room: LiveRoom, kind: str, winner_is_host: Optional[bool], quitter: Optional[str] = None
+) -> None:
+    """게임을 끝내고 **양쪽 모두에게** 결과를 알립니다.
+
+    `kind`           `"finished"`(정상 종료) 또는 `"resigned"`(나가기)
+    `winner_is_host` `True` 방장 승 · `False` 친구 승 · `None` 비김
+
+    이긴 사람을 **닉네임이 아니라 자리로** 받습니다. 두 사람 이름이 같으면
+    닉네임만으로는 누가 이겼는지 알 수 없기 때문입니다. 차례를 자리로
+    들고 있는 것과 같은 이유입니다.
+    """
+    room.finished = True
+
+    if winner_is_host is None:
+        winner = None
+    else:
+        winner = room.host_nickname if winner_is_host else room.guest_nickname
+
+    try:
+        ended_at = await run_in_threadpool(
+            record_end, room.code, kind, winner, room.host_score, room.guest_score
+        )
+    except Exception:
+        # 기록에 실패해도 게임은 끝난 것으로 봅니다. 두 사람 화면에서는
+        # 이미 끝났는데 서버만 계속 진행 중이라고 여기면 더 이상합니다.
+        ended_at = None
+
+    payload = {
+        "type": "game_over",
+        "reason": kind,
+        "winner": winner,
+        "scores": {"host": room.host_score, "guest": room.guest_score},
+        "board": room.board,
+        "at": ended_at.isoformat() if ended_at else None,
+    }
+    if quitter is not None:
+        payload["by"] = quitter
+
+    # `you_won` 은 사람마다 다릅니다. 이름이 같을 수 있어서 닉네임
+    # 비교로는 내가 이겼는지 알 수 없기 때문입니다. 비겼으면 양쪽 다 None.
+    await send_quietly(
+        room.host,
+        {**payload, "you_won": None if winner_is_host is None else winner_is_host},
+    )
+    await send_quietly(
+        room.guest,
+        {**payload, "you_won": None if winner_is_host is None else not winner_is_host},
+    )
+
+
+# 이만큼 연속으로 넘어가면 게임을 끝냅니다.
+#
+# 낼 수 있는 단어가 없을 때 서로 넘기기만 하면 게임이 영영 안 끝납니다.
+# 두 번으로 하면 한 번씩만 막혀도 끝나버려서 너무 이르고, 크게 잡으면
+# 아무도 못 내는 판을 한참 붙들고 있게 됩니다.
+MAX_PASSES = 3
+
+
+async def pass_turn(websocket: WebSocket, room: LiveRoom, sender: str) -> None:
+    """턴 넘기기. 낼 칩이 없을 때 상대에게 차례를 넘깁니다.
+
+    **세 번 연속으로 넘어가면 게임이 끝납니다.** 그때는 남은 칩을 따지지
+    않고 **그 시점의 점수 그대로** 승패를 가립니다. 아무도 못 내는 판에서
+    남은 칩으로 점수를 깎는 건 벌칙이 될 뿐입니다.
+    """
+    if room.finished:
+        await websocket.send_json({"type": "error", "message": "이미 끝난 게임입니다"})
+        return
+
+    if not room.started or room.turn_is_host is None:
+        await websocket.send_json(
+            {"type": "error", "message": "아직 게임이 시작되지 않았습니다"}
+        )
+        return
+
+    # 넘기는 것도 **자기 차례에만** 할 수 있습니다. 아니면 상대 차례를
+    # 마음대로 넘겨버릴 수 있습니다.
+    if (websocket is room.host) is not room.turn_is_host:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": f"지금은 {room.turn_nickname}님 차례입니다",
+                "turn": room.turn_nickname,
+                "your_turn": False,
+            }
+        )
+        return
+
+    room.passes += 1
+    room.turn_is_host = not room.turn_is_host
+
+    update = {
+        "type": "turn_passed",
+        "by": sender,
+        "turn": room.turn_nickname,
+        "passes": room.passes,
+        # 몇 번 더 넘기면 끝나는지. 화면에 "2번 더 넘기면 끝납니다"처럼
+        # 미리 알려줄 수 있어야 갑자기 끝나지 않습니다.
+        "passes_until_end": MAX_PASSES - room.passes,
+        "scores": {"host": room.host_score, "guest": room.guest_score},
+    }
+    await send_quietly(room.host, {**update, "your_turn": room.turn_is_host is True})
+    await send_quietly(room.guest, {**update, "your_turn": room.turn_is_host is False})
+
+    if room.passes >= MAX_PASSES:
+        await end_game(room, "passed", winner_is_host=winner_by_score(room))
+
+
+async def resign_game(websocket: WebSocket, room: LiveRoom, sender: str) -> None:
+    """나가기 버튼. 게임을 끝내고 **상대가 이긴 것**으로 합니다.
+
+    그만둔 사람을 이기게 하면 **지고 있을 때 나가버리는 게 이득**이
+    되어 버립니다. 점수와 상관없이 남은 사람이 이깁니다.
+
+    연결은 끊지 않습니다. 결과를 보고 다시 시작할 수 있어야 하기
+    때문입니다. (탭을 닫는 것은 지금까지처럼 따로 처리됩니다)
+    """
+    if not room.started or room.finished:
+        await websocket.send_json(
+            {"type": "error", "message": "지금은 나갈 게임이 없습니다"}
+        )
+        return
+
+    quit_is_host = websocket is room.host
+    # 나간 사람의 **반대편**이 이깁니다.
+    await end_game(room, "resigned", winner_is_host=not quit_is_host, quitter=sender)
+
+
 async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: dict) -> None:
     """제출을 받아 판에 놓습니다. 놓을 수 없으면 이유를 알려줍니다.
 
@@ -1151,6 +1351,12 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
     """
     # 아직 시작 안 한 게임에는 놓을 수 없습니다. 시작 전에 놓이면 그 뒤에
     # 칩을 나눠 줄 때 판에 이미 글자가 있는 이상한 상태가 됩니다.
+    if room.finished:
+        await websocket.send_json(
+            {"type": "error", "message": "이미 끝난 게임입니다"}
+        )
+        return
+
     if not room.started or room.turn_is_host is None:
         await websocket.send_json(
             {"type": "error", "message": "아직 게임이 시작되지 않았습니다"}
@@ -1249,6 +1455,10 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
     else:
         room.guest_rack = new_rack
 
+    # 누군가 실제로 놓았으니 "연속으로 넘긴 횟수"는 0으로 되돌립니다.
+    # 연속이 아니면 셀 의미가 없습니다.
+    room.passes = 0
+
     # 차례를 넘기는 건 **맨 마지막**입니다. 먼저 넘기면 중간에 문제가
     # 생겼을 때 아무도 안 놓았는데 차례만 넘어갑니다.
     room.turn_is_host = not room.turn_is_host
@@ -1311,6 +1521,19 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
         },
     )
 
+    # 이 수로 게임이 끝났는가.
+    #
+    # **가방이 비고, 방금 놓은 사람이 손패를 다 썼을 때** 끝납니다.
+    # 더 뽑을 것도 없고 낼 것도 없으면 게임이 이어질 수 없습니다.
+    #
+    # `board_updated` 를 먼저 보내고 나서 확인하는 이유: 마지막 수도
+    # 판에 올라간 모습을 양쪽이 봐야 합니다. 결과부터 던지면 무엇으로
+    # 끝났는지 못 보고 화면이 넘어갑니다.
+    if not room.bag and not new_rack:
+        # 승패는 **쌓아온 점수 그대로** 가립니다. 손에 남은 칩은
+        # 점수에 반영하지 않습니다.
+        await end_game(room, "finished", winner_is_host=winner_by_score(room))
+
 
 def mark_room_started(code: str) -> datetime:
     """방을 "시작됨"으로 표시하고, **DB 가 찍은 시각**을 돌려줍니다.
@@ -1349,6 +1572,11 @@ async def start_game(websocket: WebSocket, room: LiveRoom) -> None:
 
     # ② 이미 시작한 게임인가
     #
+    # 끝난 게임이라면 **다시 하기**입니다. 판·손패·점수를 비우고 새로
+    # 시작합니다. 안 비우면 지난 판 글자 위에서 시작하게 됩니다.
+    if room.finished:
+        room.clear_game()
+
     # 방장이 버튼을 두 번 눌렀거나 화면이 굼떠서 두 번 보내진 경우입니다.
     # 막지 않으면 진행 중인 게임이 처음으로 되돌아갑니다.
     if room.started:
@@ -1545,14 +1773,33 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
             await check_word(websocket, context[0], sender_nickname, data)
             continue
 
-        # ④ 우리가 아는 종류인가
+        # ④ 턴 넘기기 · 나가기인가
+        #
+        # 둘 다 방(그리고 상대)이 있어야 뜻이 있는 요청이라 한 묶음으로
+        # 처리합니다.
+        if data.get("type") in ("pass", "resign"):
+            context = find_context()
+            if context is None:
+                await websocket.send_json(
+                    {"type": "error", "message": "아직 상대가 들어오지 않았습니다"}
+                )
+                continue
+
+            if data["type"] == "pass":
+                await pass_turn(websocket, context[0], sender_nickname)
+            else:
+                await resign_game(websocket, context[0], sender_nickname)
+            continue
+
+        # ⑤ 우리가 아는 종류인가
         if data.get("type") != "message":
             await websocket.send_json(
                 {
                     "type": "error",
                     "message": (
                         '{"type":"message","text":"..."} · {"type":"start"} · '
-                        '{"type":"submit","tiles":[...]} 중 하나로 보내주세요'
+                        '{"type":"submit","tiles":[...]} · {"type":"pass"} · '
+                        '{"type":"resign"} 중 하나로 보내주세요'
                     ),
                 }
             )

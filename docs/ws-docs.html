@@ -412,6 +412,8 @@ function render(spec) {
           data-send='{"type":"submit","tiles":[{"row":7,"col":6,"letter":"C"},{"row":7,"col":7,"letter":"A"},{"row":7,"col":8,"letter":"X"}]}'>사전에 없는 CAX</button>
         <button class="quick" disabled
           data-send='{"type":"submit","tiles":[{"row":0,"col":0,"letter":"C"},{"row":0,"col":1,"letter":"A"},{"row":0,"col":2,"letter":"T"}]}'>구석에 놓기 (거절됨)</button>
+        <button class="quick" data-send='{"type":"pass"}' disabled>턴 넘기기 (3번이면 종료)</button>
+        <button class="quick" data-send='{"type":"resign"}' disabled>나가기 (기권)</button>
       </div>
       <div id="log"><p class="sys">아직 아무것도 오가지 않았습니다.</p></div>
     </div>

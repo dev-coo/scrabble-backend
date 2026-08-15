@@ -140,6 +140,34 @@ ALTER TABLE rooms ADD  CONSTRAINT rooms_host_nickname_valid
 -- 값이 있으면 곧 "시작했다"는 뜻이라 잃는 것도 없습니다.
 ALTER TABLE rooms ADD COLUMN IF NOT EXISTS started_at timestamp;
 
+-- 게임이 끝난 시각과 결과.
+--
+-- started_at 과 짝입니다. 둘이 있으면 "언제 시작해서 언제 끝났는가"를
+-- 알 수 있고, 그게 곧 한 판의 기록입니다.
+--
+--   ended_at  끝난 시각. 아직 진행 중이면 NULL.
+--   end_kind  어떻게 끝났는가.
+--               'finished' = 칩을 다 써서 정상적으로 끝남
+--               'resigned' = 한 사람이 나가기를 눌러서 끝남
+--               'passed'   = 세 턴 연속으로 아무도 안 내서 끝남
+--             왜 나눠 두는가: 점수만 봐서는 두 경우가 구분되지 않습니다.
+--             나중에 "중간에 나간 판이 얼마나 되나"를 볼 수 있어야 합니다.
+--   winner    이긴 사람의 닉네임. 비겼으면 NULL.
+--             ⚠️ NULL 이 "비김"과 "아직 안 끝남" 두 가지를 뜻하게 되는데,
+--             그건 ended_at 이 있는지로 구분합니다. 굳이 칸을 하나 더
+--             만들 만큼 자주 물어보는 값이 아닙니다.
+--   host_score / guest_score
+--             끝났을 때의 최종 점수. 남은 칩에 따른 가감까지 반영된 값입니다.
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS ended_at    timestamp;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS end_kind    text;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS winner      text;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS host_score  integer;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS guest_score integer;
+
+ALTER TABLE rooms DROP CONSTRAINT IF EXISTS rooms_end_kind_valid;
+ALTER TABLE rooms ADD  CONSTRAINT rooms_end_kind_valid
+    CHECK (end_kind IS NULL OR end_kind IN ('finished', 'resigned', 'passed'));
+
 
 -- ─────────────────────────────────────────────────────────────
 -- messages — 오간 대화 한 줄 한 줄
