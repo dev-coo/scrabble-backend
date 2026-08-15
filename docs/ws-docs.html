@@ -396,9 +396,13 @@ function render(spec) {
         <button class="quick" data-send='{"type":"message","text":"안녕"}' disabled>인사 보내기</button>
         <button class="quick" data-send='{"type":"start"}' disabled>게임 시작 (방장만)</button>
         <button class="quick" disabled
-          data-send='{"type":"submit","tiles":[{"row":7,"col":7,"letter":"C"},{"row":7,"col":8,"letter":"A"},{"row":7,"col":9,"letter":"T"}]}'>단어 제출 CAT (사전에 있음)</button>
+          data-send='{"type":"submit","tiles":[{"row":7,"col":6,"letter":"C"},{"row":7,"col":7,"letter":"A"},{"row":7,"col":8,"letter":"T"}]}'>① 첫 수 CAT (한가운데 지남)</button>
         <button class="quick" disabled
-          data-send='{"type":"submit","tiles":[{"row":7,"col":7,"letter":"C"},{"row":7,"col":8,"letter":"A"},{"row":7,"col":9,"letter":"X"}]}'>단어 제출 CAX (사전에 없음)</button>
+          data-send='{"type":"submit","tiles":[{"row":8,"col":8,"letter":"E"},{"row":9,"col":8,"letter":"N"}]}'>② 이어 붙이기 TEN (판의 T 아래로)</button>
+        <button class="quick" disabled
+          data-send='{"type":"submit","tiles":[{"row":7,"col":6,"letter":"C"},{"row":7,"col":7,"letter":"A"},{"row":7,"col":8,"letter":"X"}]}'>사전에 없는 CAX</button>
+        <button class="quick" disabled
+          data-send='{"type":"submit","tiles":[{"row":0,"col":0,"letter":"C"},{"row":0,"col":1,"letter":"A"},{"row":0,"col":2,"letter":"T"}]}'>구석에 놓기 (거절됨)</button>
       </div>
       <div id="log"><p class="sys">아직 아무것도 오가지 않았습니다.</p></div>
     </div>

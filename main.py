@@ -484,6 +484,17 @@ class LiveRoom:
         self.host_rack: List[str] = []
         self.guest_rack: List[str] = []
 
+        # 지금 판에 무엇이 놓여 있는가. 15×15 이고 빈 칸은 빈 문자열입니다.
+        #
+        # **두 사람이 함께 보는 판은 하나뿐**이고, 그 하나가 여기입니다.
+        # 각자 화면에만 기억하면 둘이 서로 다른 판을 보게 되는데, 그때
+        # 어느 쪽이 맞는지 판단할 방법이 없습니다.
+        #
+        # `game_data.BOARD_LAYOUT`(글자 2배 칸 등)과는 **다른 것**입니다.
+        # 저쪽은 절대 안 바뀌는 규칙이고, 이쪽은 매 수마다 바뀌는 상태입니다.
+        # 한 표에 섞으면 게임이 끝날 때마다 규칙을 다시 만들어야 합니다.
+        self.board: List[List[str]] = new_board()
+
     def clear_game(self) -> None:
         """이번 판을 없던 것으로 되돌립니다.
 
@@ -497,6 +508,9 @@ class LiveRoom:
         self.bag = []
         self.host_rack = []
         self.guest_rack = []
+        # 판도 비웁니다. 안 비우면 지난 판에 놓인 글자 위에서 새 게임이
+        # 시작돼, 첫 수부터 "이미 글자가 있는 칸"이라고 막힙니다.
+        self.board = new_board()
 
 
 # 지금 살아 있는 방들. { 초대 코드: LiveRoom }
@@ -684,47 +698,68 @@ def deal_tiles(room: LiveRoom) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# 단어 제출 — 좌표를 받아 단어로 읽고, 사전에 있는지 본다
+# 보드 상태와 단어 제출
 #
-# 프론트엔드는 사용자가 **어느 칸에 어떤 글자를 놓았는지**를 보냅니다.
-# 백엔드는 그 좌표들을 순서대로 읽어 단어 하나를 만들고, 사전에 있는지
-# 확인해서 알려줍니다.
+# 서버가 **판을 기억합니다.** 지금 어느 칸에 무슨 글자가 놓여 있는지를
+# 방마다 들고 있고, 인정된 단어는 실제로 그 판에 올립니다.
 #
-# 왜 단어가 아니라 좌표를 받는가:
-#   프론트엔드가 `{"word": "CAT"}` 처럼 완성된 단어만 보내면, 그게 판
-#   어디에 놓인 것인지 알 수 없습니다. 점수는 **어느 칸에 놓였는지**에
-#   따라 달라지고(글자 2배 칸 등), 판에 실제로 놓으려면 자리도 알아야
-#   합니다. 좌표가 원본이고 단어는 거기서 나오는 결과입니다.
+# 왜 서버가 기억해야 하는가:
+#   두 사람이 같은 판을 봅니다. 각자 자기 화면에만 기억하면 둘이 서로
+#   다른 판을 보게 되고, 어느 쪽이 맞는지 판단할 방법이 없습니다.
+#   **판은 하나뿐이어야 하고, 그 하나는 서버에 있어야 합니다.**
 #
-# 왜 백엔드가 사전을 보는가:
-#   프론트엔드에서 판단하면 사용자가 그 코드를 고쳐서 아무 단어나
-#   통과시킬 수 있습니다. 점수가 걸린 판단은 서버 몫입니다.
+#   판을 기억하기 전에는 제출한 글자들만 단어로 읽었습니다. 그래서
+#   두 번째 단어부터는 검증 자체가 성립하지 않았습니다. 스크래블은
+#   이미 놓인 글자에 이어 붙이는 게임이기 때문입니다.
 #
-# ⚠️ 지금 하는 것은 **사전 확인까지**입니다. 아래는 아직 안 합니다.
-#      · 판에 실제로 놓기 (보드 상태가 아직 없습니다)
-#      · 이미 놓인 타일과 이어지는지, 첫 수가 한가운데를 지나는지
-#      · 손에 그 칩을 정말 들고 있는지
+# 판에 놓을 때 지켜야 하는 규칙:
+#   ① 이미 글자가 있는 칸에는 못 놓는다
+#   ② 첫 수는 **한가운데(별표)를 지나야** 한다
+#   ③ 두 번째부터는 **이미 놓인 글자에 닿아야** 한다 (따로 떨어져 못 놓음)
+#   ④ 한 줄로, 사이가 비지 않게 (사이를 **이미 놓인 글자가 메우는 건 됨**)
+#   ⑤ 이번 수로 **새로 생기는 단어가 전부** 사전에 있어야 한다
+#
+# ⑤ 가 중요합니다. 가로로 한 단어를 놓아도, 그 글자들이 위아래 글자와
+# 붙으면서 **세로 단어가 여러 개 새로 생깁니다.** 그것들도 전부 진짜
+# 단어여야 합니다. 안 그러면 판이 금방 엉터리 글자로 채워집니다.
+#
+# ⚠️ 아직 안 하는 것:
+#      · 손에 그 칩을 정말 들고 있는지 확인 (없는 글자도 놓입니다)
+#      · 놓은 만큼 칩을 다시 뽑기
 #      · 점수 계산
-#      · 차례 넘기기
-#    그래서 지금은 **"이 글자들이 단어인가"만** 답해 줍니다.
+#      · 차례 지키기 (지금은 아무나 아무 때나 놓을 수 있습니다)
 # ─────────────────────────────────────────────────────────────
+
+# 빈 칸을 나타내는 값. 보드는 15×15 이고, 글자가 없는 칸은 빈 문자열입니다.
+EMPTY = ""
+
+
+def new_board() -> List[List[str]]:
+    """아무것도 안 놓인 새 판을 만듭니다.
+
+    줄마다 **따로** 만드는 게 중요합니다. `[[EMPTY] * 15] * 15` 로 만들면
+    같은 줄 하나를 열다섯 번 가리키게 되어, 한 칸에 글자를 놓으면
+    **열다섯 줄에 동시에 나타납니다.**
+    """
+    return [[EMPTY] * BOARD_SIZE for _ in range(BOARD_SIZE)]
 
 
 class SubmitError(ValueError):
-    """제출한 좌표가 단어로 읽히지 않을 때. 메시지를 그대로 사용자에게 보냅니다."""
+    """제출을 받아줄 수 없을 때. 메시지를 그대로 사용자에게 보냅니다."""
 
 
-def read_word(tiles: object) -> tuple:
-    """좌표 목록을 읽어 `(단어, 방향)` 을 돌려줍니다.
+def parse_tiles(tiles: object) -> List[tuple]:
+    """보내온 좌표 목록의 **모양**을 확인하고 `(row, col, letter)` 로 정리합니다.
 
     받는 모양:
-        [{"row": 7, "col": 7, "letter": "C"}, {"row": 7, "col": 8, "letter": "A"}, ...]
+        [{"row": 7, "col": 7, "letter": "C"}, ...]
 
     `row` 는 위에서부터, `col` 은 왼쪽부터 **0 부터** 셉니다.
     `GET /api/game/setup` 의 `board[줄][칸]` 과 같은 방식입니다.
 
-    단어로 읽을 수 없으면 `SubmitError` 를 냅니다. 왜 안 되는지를 사용자
-    에게 그대로 알려줄 수 있게, 경우마다 다른 메시지를 답니다.
+    여기서는 **판을 보지 않습니다.** 좌표 자체가 말이 되는지만 봅니다.
+    판과 맞춰 보는 일은 `check_placement` 이 합니다. 나눠 두면 "보낸 값이
+    이상한 것"과 "판에 놓을 수 없는 것"을 따로 설명해 줄 수 있습니다.
     """
     if not isinstance(tiles, list) or not tiles:
         raise SubmitError("놓은 칩이 없습니다")
@@ -732,12 +767,6 @@ def read_word(tiles: object) -> tuple:
     if len(tiles) > RACK_SIZE:
         # 손에 7개뿐이라 한 번에 8개를 놓을 수는 없습니다.
         raise SubmitError(f"한 번에 {RACK_SIZE}개까지만 놓을 수 있습니다")
-
-    if len(tiles) < MIN_WORD_LENGTH:
-        # 한 글자는 단어가 아닙니다. 원래 스크래블에서는 이미 놓인
-        # 단어에 한 글자만 붙일 수도 있지만, 아직 판에 아무것도 없어서
-        # 붙일 대상이 없습니다.
-        raise SubmitError(f"단어는 {MIN_WORD_LENGTH}글자 이상이어야 합니다")
 
     placed = []
     seen = set()
@@ -747,19 +776,30 @@ def read_word(tiles: object) -> tuple:
 
         row, col, letter = tile.get("row"), tile.get("col"), tile.get("letter")
 
-        # bool 은 파이썬에서 int 로도 통해서, True 를 좌표로 넘기면
-        # 1 로 읽힙니다. 조용히 통과하면 엉뚱한 칸이 되므로 막습니다.
-        if not isinstance(row, int) or not isinstance(col, int) or isinstance(row, bool) or isinstance(col, bool):
+        # bool 은 파이썬에서 int 로도 통해서, True 를 좌표로 넘기면 1 로
+        # 읽힙니다. 조용히 통과하면 엉뚱한 칸이 되므로 막습니다.
+        if (
+            not isinstance(row, int) or isinstance(row, bool)
+            or not isinstance(col, int) or isinstance(col, bool)
+        ):
             raise SubmitError("row 와 col 은 정수여야 합니다")
 
         if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
-            raise SubmitError(f"보드 밖입니다. row·col 은 0~{BOARD_SIZE - 1} 사이여야 합니다")
+            raise SubmitError(
+                f"보드 밖입니다. row·col 은 0~{BOARD_SIZE - 1} 사이여야 합니다"
+            )
 
-        if not isinstance(letter, str) or len(letter) != 1 or not letter.isascii() or not letter.isalpha():
+        if (
+            not isinstance(letter, str) or len(letter) != 1
+            or not letter.isascii() or not letter.isalpha()
+        ):
             # 빈 타일(`?`)을 그대로 보내면 여기서 걸립니다. 빈 타일은
             # **무슨 글자로 쓸지 정해서** 그 글자를 보내야 합니다.
             # `?` 인 채로는 무슨 단어인지 판단할 수가 없습니다.
-            raise SubmitError('letter 는 알파벳 한 글자여야 합니다. 빈 타일은 쓸 글자를 정해서 보내주세요')
+            raise SubmitError(
+                "letter 는 알파벳 한 글자여야 합니다. "
+                "빈 타일은 쓸 글자를 정해서 보내주세요"
+            )
 
         if (row, col) in seen:
             # 같은 칸에 두 장을 놓을 수는 없습니다. 막지 않으면 뒤엣것이
@@ -769,60 +809,230 @@ def read_word(tiles: object) -> tuple:
 
         placed.append((row, col, letter.upper()))
 
+    return placed
+
+
+def check_placement(board: List[List[str]], placed: List[tuple]) -> str:
+    """판에 놓을 수 있는 자리인지 보고, 방향(`across`/`down`)을 돌려줍니다.
+
+    놓을 수 없으면 `SubmitError` 를 냅니다.
+    """
+    # ① 이미 글자가 있는 칸에는 못 놓습니다.
+    for row, col, _letter in placed:
+        if board[row][col] != EMPTY:
+            raise SubmitError(
+                f"이미 글자가 있는 칸입니다 ({row}, {col}): {board[row][col]}"
+            )
+
     rows = {r for r, _c, _l in placed}
     cols = {c for _r, c, _l in placed}
 
-    # 한 줄로 놓여야 합니다. 가로면 줄이 하나, 세로면 칸이 하나입니다.
+    # ④-1 한 줄로 놓여야 합니다.
+    #
+    # 칩이 하나뿐이면 가로인지 세로인지 정할 수 없는데, 그건 문제가
+    # 아닙니다. 한 칸짜리는 위아래·양옆 어느 쪽으로든 이미 놓인 글자에
+    # 붙어서 단어를 만들 수 있고, 어느 쪽으로 붙었는지는 나중에
+    # `words_formed` 가 알아서 찾아냅니다. 일단 가로로 봅니다.
     if len(rows) == 1:
-        direction = "across"          # 가로
-        placed.sort(key=lambda t: t[1])
-        line = [c for _r, c, _l in placed]
+        direction = "across"
     elif len(cols) == 1:
-        direction = "down"            # 세로
-        placed.sort(key=lambda t: t[0])
-        line = [r for r, _c, _l in placed]
+        direction = "down"
     else:
         raise SubmitError("한 줄로(가로 또는 세로) 놓아야 합니다")
 
-    # 사이가 비면 안 됩니다. 판에 아무것도 없어서 그 빈칸을 메워 줄
-    # 글자가 없기 때문입니다. (원래 스크래블에서는 이미 놓인 타일이
-    # 사이를 메울 수 있지만, 그건 보드 상태가 생긴 뒤의 이야기입니다)
-    if line != list(range(line[0], line[0] + len(line))):
+    # ④-2 사이가 비면 안 됩니다.
+    #
+    # 다만 **이미 판에 놓인 글자가 사이를 메우는 것은 됩니다.** 그게
+    # 스크래블에서 단어를 이어 붙이는 방식입니다.
+    # (예: 판에 A 가 있을 때 C 와 T 를 양옆에 놓아 CAT 을 만드는 것)
+    if direction == "across":
+        row = next(iter(rows))
+        line = sorted(cols)
+        gaps = [
+            c for c in range(line[0], line[-1] + 1)
+            if c not in cols and board[row][c] == EMPTY
+        ]
+    else:
+        col = next(iter(cols))
+        line = sorted(rows)
+        gaps = [
+            r for r in range(line[0], line[-1] + 1)
+            if r not in rows and board[r][col] == EMPTY
+        ]
+    if gaps:
         raise SubmitError("칩 사이가 비어 있습니다. 붙여서 놓아주세요")
 
-    word = "".join(letter for _r, _c, letter in placed)
-    return word, direction, placed
+    board_empty = all(cell == EMPTY for line_ in board for cell in line_)
+
+    if board_empty:
+        # ② 첫 수는 한가운데(별표)를 지나야 합니다. 이 규칙이 없으면
+        #    구석에서 시작할 수 있고, 그러면 보드 가운데의 점수 칸들이
+        #    아무 의미가 없어집니다.
+        if not any(r == CENTER and c == CENTER for r, c, _l in placed):
+            raise SubmitError(
+                f"첫 단어는 한가운데({CENTER}, {CENTER})를 지나야 합니다"
+            )
+    else:
+        # ③ 두 번째부터는 이미 놓인 글자에 **닿아야** 합니다. 따로 떨어져
+        #    놓을 수 있으면 한 판에 서로 상관없는 단어가 흩어지게 되는데,
+        #    그건 스크래블이 아닙니다.
+        touching = False
+        for row, col, _letter in placed:
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                r, c = row + dr, col + dc
+                if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE and board[r][c] != EMPTY:
+                    touching = True
+                    break
+            if touching:
+                break
+        if not touching:
+            raise SubmitError("이미 놓인 글자에 붙여서 놓아야 합니다")
+
+    return direction
 
 
-async def check_word(websocket: WebSocket, data: dict) -> None:
-    """제출한 좌표를 단어로 읽어 **사전에 있는지** 알려줍니다.
+def _read_line(board: List[List[str]], row: int, col: int, step: tuple) -> dict:
+    """한 칸에서 시작해 **양쪽 끝까지** 글자를 따라가 단어 하나를 읽습니다.
 
-    답은 **보낸 사람에게만** 갑니다. 아직 판에 놓는 게 아니라서 상대
-    화면에는 아무 변화가 없기 때문입니다. 상대에게도 보내면 "상대가
-    뭔가 시도했다"는 정보가 새어 나가는데, 그건 알려줄 이유가 없습니다.
+    `step` 은 진행 방향입니다. `(0, 1)` 이면 가로, `(1, 0)` 이면 세로.
+
+    두 글자가 안 되면 단어가 아니므로 `None` 을 돌려줍니다.
+    (한 글자만 덩그러니 있는 것은 단어로 치지 않습니다)
+    """
+    dr, dc = step
+
+    # 시작점을 찾을 때까지 뒤로 갑니다.
+    r, c = row, col
+    while (
+        0 <= r - dr < BOARD_SIZE and 0 <= c - dc < BOARD_SIZE
+        and board[r - dr][c - dc] != EMPTY
+    ):
+        r, c = r - dr, c - dc
+
+    # 이제 끝까지 앞으로 가며 글자를 모읍니다.
+    tiles = []
+    while 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE and board[r][c] != EMPTY:
+        tiles.append({"row": r, "col": c, "letter": board[r][c]})
+        r, c = r + dr, c + dc
+
+    if len(tiles) < MIN_WORD_LENGTH:
+        return None
+    return {"word": "".join(t["letter"] for t in tiles), "tiles": tiles}
+
+
+def words_formed(
+    board: List[List[str]], placed: List[tuple], direction: str
+) -> List[dict]:
+    """이번 수로 **새로 생기는 단어를 전부** 찾습니다.
+
+    하나가 아닙니다. 가로로 한 단어를 놓아도, 놓은 글자마다 위아래
+    글자와 붙으면서 **세로 단어가 새로 생길 수 있습니다.** 그것들도
+    전부 진짜 단어여야 합니다.
+
+    `board` 는 **이미 새 글자가 올라간 판**이어야 합니다.
+    """
+    along = (0, 1) if direction == "across" else (1, 0)
+    across_ = (1, 0) if direction == "across" else (0, 1)
+
+    found = []
+    seen = set()
+
+    def add(word):
+        if word is None:
+            return
+        # 같은 단어를 두 번 세지 않도록 자리로 구분합니다. 판에 같은
+        # 단어가 두 군데 있을 수 있어서 글자만으로는 구분이 안 됩니다.
+        key = (word["tiles"][0]["row"], word["tiles"][0]["col"], word["word"])
+        if key not in seen:
+            seen.add(key)
+            found.append(word)
+
+    # 놓은 방향으로 이어지는 **주 단어** 하나.
+    row, col, _letter = placed[0]
+    add(_read_line(board, row, col, along))
+
+    # 놓은 글자 하나하나가 만드는 **교차 단어**들.
+    for row, col, _letter in placed:
+        add(_read_line(board, row, col, across_))
+
+    return found
+
+
+async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: dict) -> None:
+    """제출을 받아 판에 놓습니다. 놓을 수 없으면 이유를 알려줍니다.
+
+    성공하면 **양쪽 모두에게** 판이 바뀌었다고 알립니다. 판은 두 사람이
+    함께 보는 것이라 한쪽만 알면 화면이 어긋납니다.
+
+    실패하면 **보낸 사람에게만** 알립니다. 상대 화면에는 아무 변화가
+    없고, "상대가 뭔가 시도했다가 실패했다"를 알려줄 이유도 없습니다.
     """
     try:
-        word, direction, placed = read_word(data.get("tiles"))
+        placed = parse_tiles(data.get("tiles"))
+        direction = check_placement(room.board, placed)
     except SubmitError as e:
-        # 좌표가 잘못된 것은 **사용자의 실수**라 고쳐서 다시 보내면 됩니다.
         await websocket.send_json({"type": "error", "message": str(e)})
         return
 
-    valid = is_word(word)
+    # 판을 **베껴서** 그 위에 놓아 봅니다. 진짜 판에 바로 놓으면, 단어가
+    # 틀렸을 때 되돌려야 하는데 그 되돌리기를 빠뜨리면 엉터리 글자가
+    # 판에 남습니다. 베낀 판에서 확인하고 통과할 때만 진짜에 옮깁니다.
+    trial = [line[:] for line in room.board]
+    for row, col, letter in placed:
+        trial[row][col] = letter
+
+    words = words_formed(trial, placed, direction)
+
+    if not words:
+        # 한 글자를 아무 데도 안 붙게 놓은 경우입니다. 위 규칙들을
+        # 통과했더라도 단어가 안 만들어지면 낼 수 없습니다.
+        await websocket.send_json(
+            {"type": "error", "message": f"단어가 만들어지지 않았습니다 ({MIN_WORD_LENGTH}글자 이상)"}
+        )
+        return
+
+    checked = [{**w, "valid": is_word(w["word"])} for w in words]
+    bad = [w["word"] for w in checked if not w["valid"]]
+
+    if bad:
+        # 하나라도 사전에 없으면 **아무것도 놓지 않습니다.** 일부만 놓으면
+        # 판이 반쯤 바뀐 채로 남아서 되돌릴 수가 없습니다.
+        await websocket.send_json(
+            {
+                "type": "word_checked",
+                "valid": False,
+                "placed": False,
+                "direction": direction,
+                "words": checked,
+                "reason": "사전에 없는 단어입니다: " + ", ".join(bad),
+            }
+        )
+        return
+
+    # 전부 통과했으니 이제 진짜 판에 옮깁니다.
+    room.board = trial
 
     await websocket.send_json(
         {
             "type": "word_checked",
-            "word": word,
-            "valid": valid,
+            "valid": True,
+            "placed": True,
             "direction": direction,
-            "tiles": [
-                {"row": r, "col": c, "letter": letter} for r, c, letter in placed
-            ],
-            # 왜 안 됐는지 한 줄로 알려줍니다. 맞았으면 보낼 이유가 없습니다.
-            **({} if valid else {"reason": f"사전에 없는 단어입니다: {word}"}),
+            "words": checked,
         }
     )
+
+    # 판이 바뀐 것은 **두 사람 모두의 일**입니다.
+    update = {
+        "type": "board_updated",
+        "by": sender,
+        "direction": direction,
+        "tiles": [{"row": r, "col": c, "letter": l} for r, c, l in placed],
+        "words": [w["word"] for w in checked],
+        "board": room.board,
+    }
+    await send_quietly(room.host, update)
+    await send_quietly(room.guest, update)
 
 
 def mark_room_started(code: str) -> datetime:
@@ -933,6 +1143,11 @@ async def start_game(websocket: WebSocket, room: LiveRoom) -> None:
         # 가방에 남은 개수는 양쪽 다 알아도 되는 값입니다. 실제 스크래블
         # 에서도 남은 타일 수는 서로 볼 수 있습니다. (무엇이 남았는지는 아님)
         "tiles_left": len(room.bag),
+        # 시작 시점의 판. 지금은 반드시 비어 있지만 그래도 보냅니다.
+        # 프론트엔드가 빈 판을 스스로 만들면 크기가 어긋날 수 있고,
+        # 무엇보다 **판은 언제나 서버가 준 것을 그린다**는 규칙이 한 군데서
+        # 깨지면 나머지도 흔들립니다.
+        "board": room.board,
     }
 
     # `rack` 은 **받는 사람 자기 것**입니다. 상대 것은 개수만 보냅니다.
@@ -1016,7 +1231,15 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
         # 사람이 미리 확인해 봐도 상대에게 아무 영향이 없습니다.
         # (차례를 지키게 하는 것은 판에 실제로 놓을 때 필요합니다)
         if data.get("type") == "submit":
-            await check_word(websocket, data)
+            # 판에 놓으려면 **어느 방인지**를 알아야 합니다. 판은 방마다
+            # 따로 있기 때문입니다. 상대가 아직 없으면 놓을 수 없습니다.
+            context = find_context()
+            if context is None:
+                await websocket.send_json(
+                    {"type": "error", "message": "아직 상대가 들어오지 않았습니다"}
+                )
+                continue
+            await check_word(websocket, context[0], sender_nickname, data)
             continue
 
         # ④ 우리가 아는 종류인가

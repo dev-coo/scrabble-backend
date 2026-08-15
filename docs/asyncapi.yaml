@@ -52,17 +52,25 @@ info:
     ⚠️ `game_started` 는 **양쪽에 다른 내용**이 갑니다. `rack`(내 칩)만
     사람마다 다르고, **상대의 칩은 아예 보내지 않습니다.**
 
-    ## 단어 제출
+    ## 단어 놓기
 
     `{"type":"submit","tiles":[...]}` 로 **어느 칸에 어떤 글자를 놓았는지**
-    보내면, 백엔드가 좌표를 순서대로 읽어 단어를 만들고 **사전에 있는지**
-    알려줍니다(`word_checked`). 사전은 20만 단어입니다.
+    보내면, 백엔드가 판과 맞춰 보고 **인정되면 실제로 판에 올립니다.**
+    그러면 `board_updated` 가 **양쪽 모두에게** 갑니다.
 
     완성된 단어가 아니라 **좌표**를 보내는 이유: 단어만 보내면 판 어디에
     놓인 것인지 알 수 없습니다. 점수는 어느 칸에 놓였는지에 따라 달라집니다.
 
-    ⚠️ **아직 사전 확인까지입니다.** 판에 실제로 놓거나 · 점수를 매기거나 ·
-    차례를 넘기는 것은 없습니다. 보드 상태 자체가 아직 없습니다.
+    **판은 서버가 기억합니다.** 두 사람이 함께 보는 판은 하나뿐이고, 그
+    하나가 서버에 있습니다. 각자 화면에만 기억하면 서로 다른 판을 보게
+    되고, 그때 어느 쪽이 맞는지 판단할 방법이 없습니다.
+
+    지키는 규칙: 한 줄로 · 첫 수는 한가운데 · 이후는 이미 놓인 글자에
+    붙여서 · 겹쳐 놓기 금지 · **이번 수로 새로 생기는 단어가 전부** 사전에
+    있을 것. 하나라도 없으면 **아무것도 놓이지 않습니다.**
+
+    ⚠️ **점수·차례·손패 확인은 아직 없습니다.** 지금은 아무나 아무 때나
+    놓을 수 있고, 손에 없는 글자도 놓입니다.
 
     ## 이 화면이 계약서입니다
 
@@ -136,6 +144,8 @@ channels:
         $ref: '#/components/messages/submitIn'
       wordChecked:
         $ref: '#/components/messages/wordChecked'
+      boardUpdated:
+        $ref: '#/components/messages/boardUpdated'
       roomError:
         $ref: '#/components/messages/roomError'
 
@@ -181,6 +191,8 @@ channels:
         $ref: '#/components/messages/submitIn'
       wordChecked:
         $ref: '#/components/messages/wordChecked'
+      boardUpdated:
+        $ref: '#/components/messages/boardUpdated'
       joinError:
         $ref: '#/components/messages/joinError'
 
@@ -233,6 +245,8 @@ channels:
         $ref: '#/components/messages/submitIn'
       wordChecked:
         $ref: '#/components/messages/wordChecked'
+      boardUpdated:
+        $ref: '#/components/messages/boardUpdated'
       roomError:
         $ref: '#/components/messages/roomError'
 
@@ -271,6 +285,7 @@ operations:
       - $ref: '#/channels/rooms/messages/chatOut'
       - $ref: '#/channels/rooms/messages/gameStarted'
       - $ref: '#/channels/rooms/messages/wordChecked'
+      - $ref: '#/channels/rooms/messages/boardUpdated'
       - $ref: '#/channels/rooms/messages/roomError'
 
   receiveChatFromHost:
@@ -298,6 +313,7 @@ operations:
       - $ref: '#/channels/join/messages/chatOut'
       - $ref: '#/channels/join/messages/gameStarted'
       - $ref: '#/channels/join/messages/wordChecked'
+      - $ref: '#/channels/join/messages/boardUpdated'
       - $ref: '#/channels/join/messages/joinError'
 
   sendMatched:
@@ -314,6 +330,7 @@ operations:
       - $ref: '#/channels/match/messages/chatOut'
       - $ref: '#/channels/match/messages/gameStarted'
       - $ref: '#/channels/match/messages/wordChecked'
+      - $ref: '#/channels/match/messages/boardUpdated'
       - $ref: '#/channels/match/messages/roomError'
 
   receiveChatFromMatched:
@@ -689,7 +706,7 @@ components:
         type: object
         required:
           [type, code, host_nickname, guest_nickname, first_turn, at,
-           rack, partner_tile_count, tiles_left]
+           rack, partner_tile_count, tiles_left, board]
         properties:
           type:
             type: string
@@ -736,6 +753,16 @@ components:
               **상대가 든 칩 개수만.** 무엇을 들었는지는 오지 않습니다.
               시작 직후에는 늘 7 입니다. 상대 칩을 뒷면 몇 장으로 그릴지
               정하는 데 씁니다.
+          board:
+            type: array
+            description: |
+              **시작 시점의 판 (15줄 × 15칸).** 시작 직후에는 전부 `""` 로
+              비어 있지만 그래도 보냅니다. 프론트엔드가 빈 판을 스스로
+              만들면 크기가 어긋날 수 있고, 무엇보다 **판은 언제나 서버가
+              준 것을 그린다**는 규칙이 한 군데서 깨지면 나머지도 흔들립니다.
+            items:
+              type: array
+              items: {type: string}
           tiles_left:
             type: integer
             description: |
@@ -794,18 +821,26 @@ components:
         그 글자를 보내세요. `?` 인 채로는 무슨 단어인지 판단할 수 없습니다.
 
         놓는 규칙:
-          - **한 줄로** (가로 또는 세로) 놓아야 합니다
-          - **사이가 비면 안 됩니다.** 붙여서 놓으세요
-          - 2~7개. 한 글자는 단어가 아니고, 손에 7개뿐이라 8개는 못 놓습니다
-          - 같은 칸에 두 장을 놓을 수 없습니다
+          - **한 줄로** (가로 또는 세로)
+          - **첫 수는 한가운데(7, 7)를 지나야** 합니다
+          - **두 번째부터는 이미 놓인 글자에 닿아야** 합니다 (따로 떨어져 못 놓음)
+          - 이미 글자가 있는 칸에는 못 놓습니다
+          - 사이가 비면 안 됩니다. 단 **이미 판에 놓인 글자가 사이를 메우는 건 됩니다**
+          - 1~7개. 손에 7개뿐이라 8개는 못 놓습니다.
+            **한 개만 놓아도 됩니다** — 이미 놓인 글자에 붙어 단어가 되면 인정됩니다
+          - 같은 칸에 두 장 금지
+
+        **이번 수로 새로 생기는 단어가 전부** 사전에 있어야 합니다.
+        가로로 한 단어를 놓아도, 그 글자들이 위아래 글자와 붙으면서
+        **세로 단어가 여러 개 새로 생깁니다.** 그중 하나라도 사전에
+        없으면 **아무것도 놓이지 않습니다.**
 
         좌표가 규칙에 안 맞으면 `error` 가 돌아오지만 **연결은 끊기지
         않습니다.** 고쳐서 다시 보내면 됩니다.
 
-        ⚠️ **차례가 아니어도 보낼 수 있습니다.** 지금은 사전에 있는지
-        알려주기만 하고 판을 건드리지 않아서, 미리 확인해 봐도 상대에게
-        아무 영향이 없습니다. (차례를 지키게 하는 것은 판에 실제로 놓는
-        기능이 생길 때 필요합니다)
+        ⚠️ **차례가 아니어도 보낼 수 있습니다.** 차례를 지키게 하는 기능이
+        아직 없어서, 지금은 아무나 아무 때나 놓을 수 있습니다.
+        ⚠️ **손에 없는 글자도 놓입니다.** 손패 확인이 아직 없습니다.
       contentType: application/json
       payload:
         type: object
@@ -817,9 +852,11 @@ components:
             description: 메시지 종류. 단어를 제출할 때는 이 값입니다
           tiles:
             type: array
-            minItems: 2
+            minItems: 1
             maxItems: 7
-            description: 놓은 칩들. 한 줄로, 사이가 비지 않게.
+            description: |
+              이번에 **새로 놓는** 칩들. 이미 판에 있는 글자는 넣지 마세요.
+              한 줄로, 사이가 비지 않게(이미 놓인 글자가 메우는 건 됨).
             items:
               type: object
               required: [row, col, letter]
@@ -852,79 +889,171 @@ components:
 
     wordChecked:
       name: word_checked
-      title: 사전 확인 결과
-      summary: 제출한 글자들이 사전에 있는 단어인지 알려줍니다. **보낸 사람에게만** 갑니다.
+      title: 제출 결과 — 놓였는지 아닌지
+      summary: 제출한 수가 판에 놓였는지 알려줍니다. **보낸 사람에게만** 갑니다.
       description: |
-        `valid` 가 `true` 면 사전에 있는 단어, `false` 면 없는 단어입니다.
-        **둘 다 정상 응답입니다.** 없는 단어를 낸 것은 고장이 아니라
-        게임에서 흔히 있는 일이라 `error` 가 아닙니다.
+        `placed` 가 `true` 면 **판에 실제로 올라갔습니다.** 이때는 바로 뒤에
+        `board_updated` 가 **양쪽 모두에게** 갑니다.
 
-        (`error` 는 좌표 자체가 잘못된 경우 — 한 줄이 아니거나, 사이가
-        비었거나, 보드 밖이거나 할 때입니다.)
+        `valid` 가 `false` 면 새로 생기는 단어 중 사전에 없는 것이
+        있다는 뜻이고, 이때는 **아무것도 놓이지 않습니다.** 일부만 놓으면
+        판이 반쯤 바뀐 채로 남아 되돌릴 수 없기 때문입니다.
 
-        **상대에게는 아무것도 가지 않습니다.** 아직 판에 놓는 게 아니라
-        상대 화면에는 변화가 없고, "상대가 뭔가 시도했다"는 정보를
-        알려줄 이유도 없습니다.
+        **`valid: false` 는 `error` 가 아닙니다.** 없는 단어를 낸 것은
+        고장이 아니라 게임에서 흔히 있는 일입니다.
+        (`error` 는 애초에 놓을 수 없는 자리인 경우 — 한 줄이 아니거나,
+        겹치거나, 떨어져 있거나, 첫 수가 한가운데를 안 지나거나 할 때)
+
+        `words` 에는 **이번 수로 새로 생기는 단어가 전부** 들어 있습니다.
+        하나가 아닐 수 있습니다. 가로로 놓아도 위아래로 세로 단어가
+        같이 생기기 때문입니다.
+
+        **상대에게는 아무것도 가지 않습니다.** 놓이지 않았다면 상대 화면에
+        변화가 없고, "상대가 시도했다 실패했다"를 알려줄 이유도 없습니다.
 
         사전은 **20만 단어**이고 고유명사는 빠져 있습니다. 대소문자는
         가리지 않습니다.
-
-        ⚠️ **`valid: true` 라도 아직 판에 놓이지 않습니다.** 지금은
-        "이게 단어인가"만 답합니다. 실제로 놓기·점수·차례 넘기기는
-        아직 없습니다.
       contentType: application/json
       payload:
         type: object
-        required: [type, word, valid, direction, tiles]
+        required: [type, valid, placed, direction, words]
         properties:
           type:
             type: string
             const: word_checked
             description: 메시지 종류
-          word:
-            type: string
-            description: 좌표를 순서대로 읽어 만든 단어 (항상 대문자)
           valid:
             type: boolean
-            description: 사전에 있으면 `true`
+            description: 새로 생기는 단어가 **전부** 사전에 있으면 `true`
+          placed:
+            type: boolean
+            description: |
+              **판에 실제로 올라갔는가.** `true` 면 바로 뒤에
+              `board_updated` 가 양쪽에 옵니다.
+          direction:
+            type: string
+            enum: [across, down]
+            description: '`across` = 가로, `down` = 세로'
+          words:
+            type: array
+            description: |
+              이번 수로 **새로 생기는 단어 전부.** 하나가 아닐 수 있습니다.
+              어느 단어가 문제였는지 화면에 표시하는 데 씁니다.
+            items:
+              type: object
+              properties:
+                word:
+                  type: string
+                  description: 단어 (항상 대문자)
+                valid:
+                  type: boolean
+                  description: 이 단어가 사전에 있으면 `true`
+                tiles:
+                  type: array
+                  description: 그 단어를 이루는 칸들. **이미 판에 있던 글자도 포함**됩니다.
+          reason:
+            type: string
+            description: '`valid` 가 `false` 일 때만. 어느 단어가 사전에 없는지.'
+      examples:
+        - name: 놓임 — 두 단어가 함께 생김
+          payload:
+            type: word_checked
+            valid: true
+            placed: true
+            direction: across
+            words:
+              - word: 'ON'
+                valid: true
+                tiles: [{row: 8, col: 8, letter: O}, {row: 8, col: 9, letter: 'N'}]
+              - word: TO
+                valid: true
+                tiles: [{row: 7, col: 8, letter: T}, {row: 8, col: 8, letter: O}]
+        - name: 안 놓임 — 교차 단어가 사전에 없음
+          payload:
+            type: word_checked
+            valid: false
+            placed: false
+            direction: across
+            reason: '사전에 없는 단어입니다: XT, CX'
+            words:
+              - word: XT
+                valid: false
+                tiles: [{row: 8, col: 6, letter: X}, {row: 8, col: 7, letter: T}]
+              - word: CX
+                valid: false
+                tiles: [{row: 7, col: 6, letter: C}, {row: 8, col: 6, letter: X}]
+
+    boardUpdated:
+      name: board_updated
+      title: 판이 바뀜
+      summary: 누군가 단어를 놓아 판이 바뀌었습니다. **양쪽 모두에게** 갑니다.
+      description: |
+        판은 두 사람이 **함께 보는 하나**라서, 바뀌면 양쪽 다 알아야 합니다.
+        한쪽만 알면 서로 다른 판을 보게 되고, 그때 어느 쪽이 맞는지
+        판단할 방법이 없습니다.
+
+        **놓은 사람에게도 옵니다.** 자기 화면을 자기가 그리지 말고
+        `board` 를 받아서 그리세요. 판은 언제나 **서버가 준 것**이
+        맞습니다.
+
+        `board` 는 판 전체(15×15)입니다. 바뀐 부분만 보내지 않고 통째로
+        보내는 이유: 프론트엔드가 조각을 모아 판을 맞추다 한 번이라도
+        놓치면 그 뒤로 계속 어긋납니다. 통째로 받으면 매번 정확합니다.
+
+        빈 칸은 빈 문자열(`""`)입니다.
+        `board[줄][칸]` 으로 찾고 둘 다 0 부터 셉니다 —
+        HTTP `GET /api/game/setup` 의 보드 배열과 같은 방식입니다.
+        (저쪽은 **글자 2배 같은 칸의 성격**이고, 이쪽은 **지금 놓인 글자**입니다.
+         두 개를 겹쳐서 화면을 그리면 됩니다.)
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, by, direction, tiles, words, board]
+        properties:
+          type:
+            type: string
+            const: board_updated
+            description: 메시지 종류
+          by:
+            type: string
+            description: 놓은 사람의 닉네임
           direction:
             type: string
             enum: [across, down]
             description: '`across` = 가로, `down` = 세로'
           tiles:
             type: array
-            description: 보낸 좌표를 **읽은 순서대로** 정리해 돌려줍니다. 화면에서 순서를 맞춰 보는 데 씁니다.
+            description: 이번에 **새로 놓인** 칩들. 방금 놓인 자리를 반짝이게 하는 데 쓰면 됩니다.
             items:
               type: object
               properties:
-                row: {type: integer}
-                col: {type: integer}
-                letter: {type: string}
-          reason:
-            type: string
-            description: '`valid` 가 `false` 일 때만 옵니다. 왜 안 됐는지 한 줄.'
+                row: {type: integer, description: 위에서부터 몇 번째 줄인지 (0 부터)}
+                col: {type: integer, description: 왼쪽부터 몇 번째 칸인지 (0 부터)}
+                letter: {type: string, description: 놓인 글자 (대문자)}
+          words:
+            type: array
+            items: {type: string}
+            description: 이번 수로 새로 생긴 단어들
+          board:
+            type: array
+            description: |
+              **판 전체 (15줄 × 15칸).** 빈 칸은 `""`.
+              이것을 그대로 그리세요.
+            items:
+              type: array
+              items: {type: string}
       examples:
-        - name: 사전에 있는 단어
+        - name: 수진님이 CAT 을 놓음
           payload:
-            type: word_checked
-            word: CAT
-            valid: true
+            type: board_updated
+            by: 수진
             direction: across
             tiles:
-              - {row: 7, col: 7, letter: C}
-              - {row: 7, col: 8, letter: A}
-              - {row: 7, col: 9, letter: T}
-        - name: 사전에 없는 단어
-          payload:
-            type: word_checked
-            word: CAX
-            valid: false
-            direction: across
-            reason: '사전에 없는 단어입니다: CAX'
-            tiles:
-              - {row: 7, col: 7, letter: C}
-              - {row: 7, col: 8, letter: A}
-              - {row: 7, col: 9, letter: X}
+              - {row: 7, col: 6, letter: C}
+              - {row: 7, col: 7, letter: A}
+              - {row: 7, col: 8, letter: T}
+            words: [CAT]
+            board: ['…15줄 × 15칸…']
 
     guestJoined:
       name: guest_joined
@@ -1147,13 +1276,12 @@ components:
 #   끊기면 프론트엔드가 직접 다시 연결해야 합니다. (ws.onclose)
 # ─────────────────────────────────────────────────────────────
 x-not-implemented-yet:
-  - '**보드 상태** — 서버는 지금 판에 무엇이 놓여 있는지 **기억하지 않습니다.** 그래서 `submit` 은 보낸 글자들만 단어로 읽습니다. 이미 놓인 타일과 이어 붙이거나 사이를 메우는 것은 아직 안 됩니다'
-  - '**판에 실제로 놓기** — `word_checked` 로 "단어가 맞다"까지만 알려줍니다. `valid: true` 라도 판은 그대로입니다'
-  - '**손에 그 칩을 정말 들고 있는지 확인** — 지금은 `rack` 에 없는 글자를 제출해도 통과합니다'
-  - '**점수 계산** — 글자 2배·단어 3배 칸이 보드에 있지만 아직 아무 데도 쓰이지 않습니다'
-  - '**칩 다시 뽑기** — 단어를 놓은 만큼 가방에서 채우는 것. 지금은 시작할 때 7개를 나눠 주는 것까지입니다'
-  - 차례 넘기기 — `first_turn` 으로 누가 먼저인지는 알려주지만, 그 뒤로 차례가 넘어가지 않습니다. 그래서 `submit` 은 차례가 아니어도 보낼 수 있습니다
-  - '첫 단어가 한가운데(`ST` 칸)를 지나야 한다는 규칙 — 아직 확인하지 않습니다'
+  - '**차례 지키기** ← 지금 가장 급합니다. `first_turn` 으로 누가 먼저인지는 알려주지만 차례가 넘어가지 않아서, **아무나 아무 때나 놓을 수 있습니다.** 판이 하나뿐이라 둘이 동시에 놓으면 먼저 도착한 쪽이 이깁니다'
+  - '**손에 그 칩을 정말 들고 있는지 확인** — `rack` 에 **없는 글자도 그대로 놓입니다.** 손패는 나눠 주기만 하고 줄어들지 않습니다'
+  - '**칩 다시 뽑기** — 단어를 놓은 만큼 가방에서 채우는 것. 가방은 시작할 때 86개인 채로 줄지 않습니다'
+  - '**점수 계산** — 글자 2배·단어 3배 칸이 보드에 있지만 아직 아무 데도 쓰이지 않습니다. 점수라는 개념 자체가 없습니다'
+  - '게임 끝내기 — 가방이 비고 한쪽이 칩을 다 쓰면 끝나야 하지만, 끝나는 조건이 없습니다'
+  - '판 되돌리기(무르기) · 칩 교환하기 · 차례 넘기고 쉬기(pass)'
   - 게임이 끝났다는 알림 (`game_over`). 상대가 나가면 `guest_left` / `partner_left` 로만 알 수 있습니다
   - (랜덤 매칭) **자기가 방장인지 알 방법** — `matched` 에 그 정보가 없어서, `start` 를 눌러보기 전에는 모릅니다
   - 지난 대화 **불러오기**. 저장은 되지만 꺼내 볼 방법이 아직 없어서, 새로고침하면 화면은 여전히 비어 있습니다
