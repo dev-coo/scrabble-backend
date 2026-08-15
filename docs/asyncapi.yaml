@@ -77,7 +77,16 @@ info:
     내 차례인지는 **`your_turn`** 을 보세요. `turn` 에 닉네임도 오지만,
     두 사람 이름이 같을 수 있어서 이름 비교로는 알 수 없습니다.
 
-    ⚠️ **점수·손패 확인은 아직 없습니다.** 손에 없는 글자도 놓입니다.
+    ## 손패와 점수
+
+    놓으면 **쓴 칩이 손에서 빠지고 그만큼 가방에서 채워집니다.** 손에 없는
+    칩은 놓을 수 없습니다.
+
+    점수는 세 가지를 더합니다 — **글자 점수 + 보너스 칸 + 7개 다 쓰면 +50.**
+    보너스 칸은 **이번에 새로 놓은 자리에서만** 걸립니다. 이미 놓인 글자가
+    밟고 있는 칸은 그때 이미 썼습니다.
+
+    빈 타일은 **0점**입니다.
 
     ## 이 화면이 계약서입니다
 
@@ -713,7 +722,7 @@ components:
         type: object
         required:
           [type, code, host_nickname, guest_nickname, first_turn, turn,
-           your_turn, at, rack, partner_tile_count, tiles_left, board]
+           your_turn, at, rack, partner_tile_count, tiles_left, board, scores]
         properties:
           type:
             type: string
@@ -789,6 +798,14 @@ components:
             items:
               type: array
               items: {type: string}
+          scores:
+            type: object
+            description: |
+              **시작 점수.** 둘 다 0 이지만, 점수판 자리를 처음부터 서버가
+              준 값으로 채우게 하려고 함께 보냅니다.
+            properties:
+              host: {type: integer}
+              guest: {type: integer}
           tiles_left:
             type: integer
             description: |
@@ -805,10 +822,19 @@ components:
             first_turn: 엘리
             turn: 엘리
             your_turn: false
+            tiles_left: 83
+            partner_tile_count: 7
+            score:
+              words: [{word: CAT, score: 10}]
+              words_score: 10
+              bingo: 0
+              total: 10
+            scores: {host: 10, guest: 0}
             at: '2026-08-15T14:02:11.482913'
             rack: [E, A, T, '?', R, N, S]
             partner_tile_count: 7
             tiles_left: 86
+            scores: {host: 0, guest: 0}
         - name: 친구가 받는 것 (같은 게임 — rack 만 다름)
           payload:
             type: game_started
@@ -822,6 +848,7 @@ components:
             rack: [O, I, D, L, G, U, M]
             partner_tile_count: 7
             tiles_left: 86
+            scores: {host: 0, guest: 0}
 
     submitIn:
       name: submit (보내는 쪽)
@@ -875,7 +902,12 @@ components:
         놓기에 **성공했을 때만** 차례가 넘어갑니다. 사전에 없는 단어를
         내거나 자리가 잘못돼서 거절되면 **차례는 그대로 나에게 있습니다.**
 
-        ⚠️ **손에 없는 글자도 놓입니다.** 손패 확인이 아직 없습니다.
+        **손에 있는 칩만 놓을 수 있습니다.** 없으면
+        `손에 없는 칩입니다: Z` 가 돌아옵니다.
+
+        빈 타일은 `?` 가 아니라 **정한 글자로** 보내세요. 서버는 진짜 글자를
+        먼저 쓰고, 그게 없을 때만 빈 타일을 씁니다. (빈 타일은 아껴 두는 게
+        이득이라 사람도 그렇게 씁니다)
       contentType: application/json
       payload:
         type: object
@@ -986,6 +1018,47 @@ components:
                 tiles:
                   type: array
                   description: 그 단어를 이루는 칸들. **이미 판에 있던 글자도 포함**됩니다.
+          rack:
+            type: array
+            items: {type: string}
+            description: |
+              **놓은 뒤의 내 손패.** `placed: true` 일 때만 옵니다.
+              쓴 칩이 빠지고 **놓은 개수만큼 가방에서 채워져** 다시 7개입니다.
+              (가방이 바닥나면 7개보다 적을 수 있습니다)
+
+              **놓은 사람에게만** 갑니다. 상대에게 보내면 내가 무슨 칩을
+              들었는지 그대로 알려주는 셈입니다.
+          drawn:
+            type: array
+            items: {type: string}
+            description: 이번에 **새로 뽑은 칩.** 화면에서 새로 온 칩을 표시하는 데 쓰면 됩니다.
+          tiles_left:
+            type: integer
+            description: 뽑고 난 뒤 가방에 남은 개수
+          score:
+            type: object
+            description: |
+              **이번 수로 얻은 점수.** `placed: true` 일 때만 옵니다.
+              `board_updated` 에도 같은 값이 들어 있습니다.
+            properties:
+              words:
+                type: array
+                description: 단어별 점수 내역. 화면에 "CAT 10점" 처럼 풀어 보여주는 데 씁니다.
+                items:
+                  type: object
+                  properties:
+                    word: {type: string, description: 단어}
+                    score: {type: integer, description: 그 단어의 점수}
+              words_score:
+                type: integer
+                description: 단어 점수 합계 (빙고 제외)
+              bingo:
+                type: integer
+                description: |
+                  손패 7개를 한 번에 다 썼을 때 주는 **+50점.** 아니면 0.
+              total:
+                type: integer
+                description: '`words_score` + `bingo`'
           reason:
             type: string
             description: '`valid` 가 `false` 일 때만. 어느 단어가 사전에 없는지.'
@@ -1003,6 +1076,16 @@ components:
               - word: TO
                 valid: true
                 tiles: [{row: 7, col: 8, letter: T}, {row: 8, col: 8, letter: O}]
+            rack: [E, A, R, S, T, L, I]
+            drawn: [L, I]
+            tiles_left: 84
+            score:
+              words:
+                - {word: 'ON', score: 2}
+                - {word: TO, score: 2}
+              words_score: 4
+              bingo: 0
+              total: 4
         - name: 안 놓임 — 교차 단어가 사전에 없음
           payload:
             type: word_checked
@@ -1043,7 +1126,8 @@ components:
       contentType: application/json
       payload:
         type: object
-        required: [type, by, direction, tiles, words, board, turn, your_turn]
+        required: [type, by, direction, tiles, words, board, turn, your_turn,
+                   tiles_left, partner_tile_count, score, scores]
         properties:
           type:
             type: string
@@ -1085,8 +1169,40 @@ components:
           your_turn:
             type: boolean
             description: |
-              **받는 사람 본인의 차례인가.** 이 필드만 사람마다 다릅니다.
-              놓은 사람은 `false`, 상대는 `true` 가 됩니다.
+              **받는 사람 본인의 차례인가.** 놓은 사람은 `false`,
+              상대는 `true` 가 됩니다. (사람마다 다른 값)
+          tiles_left:
+            type: integer
+            description: 가방에 남은 칩 개수. 놓은 사람이 그만큼 다시 뽑아서 줄어듭니다.
+          partner_tile_count:
+            type: integer
+            description: |
+              **상대가 든 칩 개수.** (사람마다 다른 값)
+              무엇을 들었는지는 오지 않습니다.
+          score:
+            type: object
+            description: |
+              **이번 수로 얻은 점수.** 단어별 내역까지 들어 있어서
+              "OO님이 CAT 으로 10점" 처럼 보여줄 수 있습니다.
+            properties:
+              words:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    word: {type: string}
+                    score: {type: integer}
+              words_score: {type: integer, description: 단어 점수 합계}
+              bingo: {type: integer, description: '7개 다 썼으면 50, 아니면 0'}
+              total: {type: integer, description: 이번 수 총점}
+          scores:
+            type: object
+            description: |
+              **지금까지 쌓인 두 사람 점수.** 점수판은 둘 다 보는 것이라
+              양쪽에 같은 값이 갑니다.
+            properties:
+              host: {type: integer, description: 방장 누적 점수}
+              guest: {type: integer, description: 친구 누적 점수}
       examples:
         - name: 수진님이 CAT 을 놓음
           payload:
@@ -1101,6 +1217,14 @@ components:
             board: ['…15줄 × 15칸…']
             turn: 엘리
             your_turn: false
+            tiles_left: 83
+            partner_tile_count: 7
+            score:
+              words: [{word: CAT, score: 10}]
+              words_score: 10
+              bingo: 0
+              total: 10
+            scores: {host: 10, guest: 0}
 
     guestJoined:
       name: guest_joined
@@ -1323,10 +1447,8 @@ components:
 #   끊기면 프론트엔드가 직접 다시 연결해야 합니다. (ws.onclose)
 # ─────────────────────────────────────────────────────────────
 x-not-implemented-yet:
-  - '**손에 그 칩을 정말 들고 있는지 확인** ← 지금 가장 급합니다. `rack` 에 **없는 글자도 그대로 놓입니다.** 손패는 나눠 주기만 하고 줄어들지 않습니다'
-  - '**칩 다시 뽑기** — 단어를 놓은 만큼 가방에서 채우는 것. 가방은 시작할 때 86개인 채로 줄지 않습니다'
-  - '**점수 계산** — 글자 2배·단어 3배 칸이 보드에 있지만 아직 아무 데도 쓰이지 않습니다. 점수라는 개념 자체가 없습니다'
-  - '게임 끝내기 — 가방이 비고 한쪽이 칩을 다 쓰면 끝나야 하지만, 끝나는 조건이 없습니다'
+  - '**게임 끝내기** ← 지금 가장 급합니다. 가방이 비고 한쪽이 칩을 다 쓰면 끝나야 하는데, **끝나는 조건이 없어서 영원히 이어집니다.** 이긴 사람도 정해지지 않습니다'
+  - '**빈 타일을 어느 칸에 썼는지** — 프론트에서 `S` 로 보내면 서버는 그게 진짜 S 였는지 빈 타일이었는지 모릅니다. 진짜 글자를 먼저 쓰는 규칙으로 처리하지만, 점수를 정확히 매기려면 `blank: true` 같은 표시를 계약에 넣어야 합니다'
   - '판 되돌리기(무르기) · 칩 교환하기 · 차례 넘기고 쉬기(pass)'
   - 게임이 끝났다는 알림 (`game_over`). 상대가 나가면 `guest_left` / `partner_left` 로만 알 수 있습니다
   - (랜덤 매칭) **자기가 방장인지 알 방법** — `matched` 에 그 정보가 없어서, `start` 를 눌러보기 전에는 모릅니다

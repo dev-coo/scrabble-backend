@@ -30,12 +30,14 @@ from starlette.websockets import WebSocketState
 from db import get_connection
 from dictionary import MIN_WORD_LENGTH, WORD_COUNT, is_word
 from game_data import (
+    BLANK,
     BOARD_LAYOUT,
     BOARD_SIZE,
     CENTER,
     PREMIUM_LEGEND,
     RACK_SIZE,
     TILE_DISTRIBUTION,
+    TILE_POINTS,
     TOTAL_TILES,
     build_bag,
 )
@@ -504,6 +506,13 @@ class LiveRoom:
         # 한 표에 섞으면 게임이 끝날 때마다 규칙을 다시 만들어야 합니다.
         self.board: List[List[str]] = new_board()
 
+        # 지금까지 쌓인 점수. 매 수마다 더해집니다.
+        #
+        # 칩과 마찬가지로 **자리(방장/친구)로** 나눠 둡니다. 닉네임을
+        # 열쇠로 쓰면 이름이 같을 때 두 사람 점수가 한 칸에 합쳐집니다.
+        self.host_score = 0
+        self.guest_score = 0
+
     @property
     def turn_nickname(self) -> Optional[str]:
         """지금 차례인 사람의 닉네임. **화면에 보여줄 때만** 씁니다.
@@ -529,6 +538,8 @@ class LiveRoom:
         self.bag = []
         self.host_rack = []
         self.guest_rack = []
+        self.host_score = 0
+        self.guest_score = 0
         # 판도 비웁니다. 안 비우면 지난 판에 놓인 글자 위에서 새 게임이
         # 시작돼, 첫 수부터 "이미 글자가 있는 칸"이라고 막힙니다.
         self.board = new_board()
@@ -979,6 +990,156 @@ def words_formed(
     return found
 
 
+# ─────────────────────────────────────────────────────────────
+# 손패 관리 — 쓴 칩을 빼고, 그만큼 다시 뽑는다
+#
+# 놓은 만큼 가방에서 채워 넣어야 손에 늘 7개가 있습니다. 안 채우면
+# 몇 수 만에 손이 비어서 게임이 멈춥니다.
+#
+# 채우려면 **먼저 빼야** 하고, 빼려면 **그 칩을 정말 갖고 있는지**
+# 확인해야 합니다. 확인 없이 빼면 손에 없는 글자를 놓고도 손패가
+# 줄어드는 이상한 일이 생깁니다. 그래서 세 가지가 한 덩어리입니다.
+# ─────────────────────────────────────────────────────────────
+
+
+def take_from_rack(rack: List[str], placed: List[tuple]) -> tuple:
+    """손패에서 쓸 칩을 골라 냅니다. `(쓰고 남은 손패, 실제로 쓴 칩)`.
+
+    없는 칩을 놓으려 하면 `SubmitError` 를 냅니다.
+
+    **빈 타일 처리:** 프론트엔드는 빈 타일을 `S` 처럼 **정한 글자로**
+    보냅니다(`?` 로 보내면 무슨 단어인지 알 수 없으니까요). 그래서 서버는
+    "S 를 놓았다"만 보고 그게 진짜 S 였는지 빈 타일이었는지 알 수 없습니다.
+
+    그래서 **진짜 글자를 먼저 쓰고, 없을 때만 빈 타일을 씁니다.**
+    빈 타일은 아무 글자로나 쓸 수 있어서 아껴 두는 게 이득이고, 사람도
+    그렇게 씁니다. 진짜 S 가 있는데 굳이 빈 타일을 S 로 쓰는 사람은 없습니다.
+
+    ⚠️ 다만 이 방식으로는 **나중에 점수를 매길 때** 그 칸이 빈 타일이었는지
+    (0점) 진짜 글자였는지 구분할 수 없습니다. 점수 기능을 만들 때
+    프론트엔드가 "이건 빈 타일이다"를 함께 보내도록 계약을 늘려야 합니다.
+    """
+    remaining = list(rack)
+    used = []
+
+    for _row, _col, letter in placed:
+        if letter in remaining:
+            remaining.remove(letter)
+            used.append(letter)
+        elif BLANK in remaining:
+            # 진짜 글자가 없으니 빈 타일을 그 글자로 쓴 것입니다.
+            remaining.remove(BLANK)
+            used.append(BLANK)
+        else:
+            raise SubmitError(f"손에 없는 칩입니다: {letter}")
+
+    return remaining, used
+
+
+def draw_tiles(bag: List[str], count: int) -> List[str]:
+    """가방에서 `count` 개를 꺼냅니다. 모자라면 **있는 만큼만** 줍니다.
+
+    모자란 것은 고장이 아닙니다. 게임 막바지에는 원래 가방이 바닥나고,
+    그때부터는 손에 남은 것으로만 둡니다. 여기서 에러를 내면 게임이
+    끝나갈 때마다 멈춰버립니다.
+
+    가방은 나눠 줄 때 이미 섞여 있어서 다시 섞지 않습니다. 뒤에서부터
+    꺼내는 것도 그때와 같은 이유입니다.
+    """
+    return [bag.pop() for _ in range(min(count, len(bag)))]
+
+
+# ─────────────────────────────────────────────────────────────
+# 점수 계산
+#
+# 세 가지를 더합니다.
+#   ① 글자 점수  — 타일마다 정해진 점수 (E=1, Q=10 …)
+#   ② 보너스 칸  — 글자 2배·3배, 단어 2배·3배
+#   ③ 한 번에 7개를 다 쓰면 **+50점** (스크래블에서 "빙고"라고 부릅니다)
+#
+# 순서가 중요합니다. **글자 배수를 먼저 다 적용한 뒤에 단어 배수를 겁니다.**
+# 반대로 하면 글자 2배 칸의 효과까지 단어 배수에 곱해지지 않아 점수가
+# 작게 나옵니다.
+#
+# 보너스 칸은 **이번에 새로 놓은 자리에서만** 적용됩니다. 이미 놓여 있던
+# 글자가 밟고 있는 칸은 그때 이미 썼습니다. 안 그러면 같은 2배 칸을
+# 지나가는 단어마다 계속 우려먹게 됩니다.
+#
+# 빈 타일은 **0점**입니다. 아무 글자로나 쓸 수 있는 대신 점수를 포기하는
+# 것이 빈 타일의 거래 조건입니다.
+# ─────────────────────────────────────────────────────────────
+
+# 한 번에 손패를 다 쓰면 주는 보너스.
+BINGO_BONUS = 50
+
+
+def score_word(word: dict, fresh: set, blanks: set) -> int:
+    """단어 하나의 점수를 냅니다.
+
+    `fresh`  = 이번에 새로 놓은 자리들 `{(row, col), ...}`
+    `blanks` = 그중 빈 타일로 놓은 자리들
+    """
+    total = 0
+    word_multipliers = []
+
+    for tile in word["tiles"]:
+        spot = (tile["row"], tile["col"])
+
+        # 빈 타일은 0점입니다.
+        points = 0 if spot in blanks else TILE_POINTS.get(tile["letter"], 0)
+
+        # 보너스 칸은 **이번에 새로 놓은 자리에서만** 걸립니다.
+        if spot in fresh:
+            square = BOARD_LAYOUT[tile["row"]][tile["col"]]
+            bonus = PREMIUM_LEGEND.get(square)
+            if bonus:
+                if bonus["applies_to"] == "letter":
+                    points *= bonus["multiplier"]
+                else:
+                    # 단어 배수는 글자를 다 더한 뒤에 겁니다.
+                    word_multipliers.append(bonus["multiplier"])
+
+        total += points
+
+    for multiplier in word_multipliers:
+        total *= multiplier
+
+    return total
+
+
+def score_move(words: List[dict], placed: List[tuple], used: List[str]) -> dict:
+    """이번 수의 점수를 냅니다.
+
+    `words` 는 이번에 새로 생긴 단어 전부입니다. **하나가 아닐 수 있고,
+    각각 따로 점수가 붙습니다.** 가로로 놓으면서 세로 단어가 같이
+    생겼다면 그 세로 단어들도 전부 점수에 들어갑니다.
+
+    `used` 는 손패에서 실제로 꺼낸 칩입니다. `placed` 와 순서가 같아서,
+    몇 번째 자리가 빈 타일이었는지 여기서 알 수 있습니다.
+    """
+    fresh = {(row, col) for row, col, _letter in placed}
+    blanks = {
+        (placed[i][0], placed[i][1])
+        for i, tile in enumerate(used)
+        if tile == BLANK
+    }
+
+    scored = [
+        {"word": w["word"], "score": score_word(w, fresh, blanks)} for w in words
+    ]
+    words_total = sum(w["score"] for w in scored)
+
+    # 손패 7개를 한 번에 다 쓰면 보너스. 어려운 일이라 크게 줍니다.
+    bingo = BINGO_BONUS if len(placed) == RACK_SIZE else 0
+
+    return {
+        "words": scored,
+        "words_score": words_total,
+        "bingo": bingo,
+        "total": words_total + bingo,
+    }
+
+
 async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: dict) -> None:
     """제출을 받아 판에 놓습니다. 놓을 수 없으면 이유를 알려줍니다.
 
@@ -1015,9 +1176,17 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
         )
         return
 
+    # 놓는 사람이 방장인지 친구인지에 따라 손패가 다릅니다.
+    is_host = websocket is room.host
+    my_rack = room.host_rack if is_host else room.guest_rack
+
     try:
         placed = parse_tiles(data.get("tiles"))
         direction = check_placement(room.board, placed)
+        # **손에 정말 있는 칩인가.** 자리가 맞아도 없는 칩은 못 놓습니다.
+        # 자리 확인 다음, 사전 확인 앞에 둡니다. 없는 칩이면 그게 무슨
+        # 단어인지 따져볼 필요조차 없기 때문입니다.
+        rest_of_rack, used = take_from_rack(my_rack, placed)
     except SubmitError as e:
         await websocket.send_json({"type": "error", "message": str(e)})
         return
@@ -1057,11 +1226,31 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
         )
         return
 
-    # 전부 통과했으니 이제 진짜 판에 옮기고 **차례를 넘깁니다.**
+    # 전부 통과했습니다. 이제부터가 **실제로 바꾸는 부분**입니다.
     #
-    # 차례를 넘기는 건 놓기가 완전히 끝난 뒤여야 합니다. 먼저 넘기면
-    # 중간에 문제가 생겼을 때 아무도 안 놓았는데 차례만 넘어갑니다.
+    # 여기까지 오는 동안 아무것도 안 바꿨다는 점이 중요합니다. 중간에
+    # 거절되면 판도 손패도 가방도 그대로라, 되돌릴 것이 없습니다.
     room.board = trial
+
+    # 점수를 냅니다. **판에 올린 뒤·보너스 칸을 쓰기 전**이라, 이번에 새로
+    # 놓은 자리의 보너스가 그대로 적용됩니다.
+    score = score_move(words, placed, used)
+    if is_host:
+        room.host_score += score["total"]
+    else:
+        room.guest_score += score["total"]
+
+    # 쓴 칩을 손에서 빼고, **놓은 개수만큼** 가방에서 다시 뽑습니다.
+    # 안 채우면 몇 수 만에 손이 비어 게임이 멈춥니다.
+    drawn = draw_tiles(room.bag, len(used))
+    new_rack = rest_of_rack + drawn
+    if is_host:
+        room.host_rack = new_rack
+    else:
+        room.guest_rack = new_rack
+
+    # 차례를 넘기는 건 **맨 마지막**입니다. 먼저 넘기면 중간에 문제가
+    # 생겼을 때 아무도 안 놓았는데 차례만 넘어갑니다.
     room.turn_is_host = not room.turn_is_host
 
     await websocket.send_json(
@@ -1071,6 +1260,14 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
             "placed": True,
             "direction": direction,
             "words": checked,
+            # 새 손패는 **놓은 사람에게만** 갑니다. 상대에게 보내면
+            # 내가 무슨 칩을 들었는지 그대로 알려주는 셈입니다.
+            "rack": new_rack,
+            "drawn": drawn,
+            "tiles_left": len(room.bag),
+            # 이번 수로 얻은 점수. 단어별 내역까지 함께 보내서 화면에
+            # "CAT 10점 + 빙고 50점" 처럼 풀어 보여줄 수 있게 합니다.
+            "score": score,
         }
     )
 
@@ -1084,11 +1281,35 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
         "board": room.board,
         # 이제 누구 차례인지. 방금 놓은 사람의 **상대**입니다.
         "turn": room.turn_nickname,
+        # 가방에 남은 개수. 양쪽 다 알아도 되는 값입니다.
+        "tiles_left": len(room.bag),
+        # 이번 수로 얻은 점수와, 지금까지 쌓인 두 사람 점수.
+        # 점수판은 **둘 다 보는 것**이라 양쪽에 같이 보냅니다.
+        "score": score,
+        "scores": {
+            "host": room.host_score,
+            "guest": room.guest_score,
+        },
     }
-    # `your_turn` 만 사람마다 다릅니다. 이름이 같을 수 있어서 닉네임
-    # 비교로는 내 차례인지 알 수 없기 때문입니다.
-    await send_quietly(room.host, {**update, "your_turn": room.turn_is_host is True})
-    await send_quietly(room.guest, {**update, "your_turn": room.turn_is_host is False})
+    # `your_turn` 과 `partner_tile_count` 는 사람마다 다릅니다.
+    # 이름이 같을 수 있어서 닉네임 비교로는 내 차례인지 알 수 없고,
+    # "상대가 몇 장 들었는지"도 보는 사람에 따라 다른 값입니다.
+    await send_quietly(
+        room.host,
+        {
+            **update,
+            "your_turn": room.turn_is_host is True,
+            "partner_tile_count": len(room.guest_rack),
+        },
+    )
+    await send_quietly(
+        room.guest,
+        {
+            **update,
+            "your_turn": room.turn_is_host is False,
+            "partner_tile_count": len(room.host_rack),
+        },
+    )
 
 
 def mark_room_started(code: str) -> datetime:
@@ -1208,6 +1429,9 @@ async def start_game(websocket: WebSocket, room: LiveRoom) -> None:
         # 가방에 남은 개수는 양쪽 다 알아도 되는 값입니다. 실제 스크래블
         # 에서도 남은 타일 수는 서로 볼 수 있습니다. (무엇이 남았는지는 아님)
         "tiles_left": len(room.bag),
+        # 시작 점수. 둘 다 0 이지만, 점수판을 그리는 자리를 처음부터
+        # 서버가 준 값으로 채우게 하려고 함께 보냅니다.
+        "scores": {"host": room.host_score, "guest": room.guest_score},
         # 시작 시점의 판. 지금은 반드시 비어 있지만 그래도 보냅니다.
         # 프론트엔드가 빈 판을 스스로 만들면 크기가 어긋날 수 있고,
         # 무엇보다 **판은 언제나 서버가 준 것을 그린다**는 규칙이 한 군데서
