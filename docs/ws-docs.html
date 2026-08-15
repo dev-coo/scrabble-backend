@@ -322,6 +322,13 @@ function render(spec) {
   const disconnect = (spec["x-disconnect"] || []).map((r) =>
     `<tr><td>${fmt(r["상황"])}</td><td>${fmt(r["결과"])}</td></tr>`).join("");
 
+  // 어떤 메시지를 받으면 어느 화면이어야 하는가. 이 표가 없으면
+  // 프론트엔드는 화면 전환 시점을 짐작해야 합니다.
+  const screenFlow = (spec["x-screen-flow"] || []).map((r) =>
+    `<tr><td><code>${esc(r["받은메시지"])}</code></td><td>${fmt(r["화면"])}</td></tr>`).join("");
+  const screenNotes = (spec["x-screen-notes"] || [])
+    .map((s) => `<li>${fmt(s)}</li>`).join("");
+
   document.getElementById("app").innerHTML = `
     <header>
       <h1>${esc(info.title || "웹소켓 명세")} <span class="version">v${esc(info.version || "")}</span></h1>
@@ -364,6 +371,15 @@ function render(spec) {
       </div>
       <div id="log"><p class="sys">아직 아무것도 오가지 않았습니다.</p></div>
     </div>
+
+    <h2>화면 전환 — 언제 게임 페이지로 넘어가나</h2>
+    <div class="note">
+      <b>백엔드는 화면을 그리지 않습니다.</b> “지금 바꿔라”는 신호만 보냅니다.<br>
+      화면이 어떻게 생겼는지는 프론트엔드가 정하고, <b>언제</b> 바꾸는지만 여기서 약속합니다.
+    </div>
+    <table><thead><tr><th>받은 메시지</th><th>있어야 할 화면</th></tr></thead>
+      <tbody>${screenFlow}</tbody></table>
+    <ul class="plain">${screenNotes}</ul>
 
     <h2>아직 없는 것</h2>
     <p>여기까지는 <b>만나서 대화하고, 게임을 시작하는 것</b>까지입니다. 아래는 아직 없습니다.</p>
