@@ -94,7 +94,8 @@ info:
     끝나는 길이 **세 가지**입니다.
 
     - **정상 종료** — 가방이 비고 누군가 손패를 다 쓰면
-    - **세 번 연속 넘기기** — `{"type":"pass"}` 로 넘길 수 있고, 세 번 이어지면
+    - **세 번 연속 칩을 안 냄** — 넘기기(`pass`)든 교환(`exchange`)이든
+      세 번 이어지면
     - **나가기** — `{"type":"resign"}`. **점수와 상관없이 남은 사람이 이깁니다.**
 
     **승패는 쌓아온 점수만으로** 가립니다. 손에 남은 칩은 점수에 반영하지
@@ -179,6 +180,12 @@ channels:
         $ref: '#/components/messages/boardUpdated'
       passIn:
         $ref: '#/components/messages/passIn'
+      exchangeIn:
+        $ref: '#/components/messages/exchangeIn'
+      exchanged:
+        $ref: '#/components/messages/exchanged'
+      tilesExchanged:
+        $ref: '#/components/messages/tilesExchanged'
       resignIn:
         $ref: '#/components/messages/resignIn'
       turnPassed:
@@ -236,6 +243,12 @@ channels:
         $ref: '#/components/messages/boardUpdated'
       passIn:
         $ref: '#/components/messages/passIn'
+      exchangeIn:
+        $ref: '#/components/messages/exchangeIn'
+      exchanged:
+        $ref: '#/components/messages/exchanged'
+      tilesExchanged:
+        $ref: '#/components/messages/tilesExchanged'
       resignIn:
         $ref: '#/components/messages/resignIn'
       turnPassed:
@@ -298,6 +311,12 @@ channels:
         $ref: '#/components/messages/boardUpdated'
       passIn:
         $ref: '#/components/messages/passIn'
+      exchangeIn:
+        $ref: '#/components/messages/exchangeIn'
+      exchanged:
+        $ref: '#/components/messages/exchanged'
+      tilesExchanged:
+        $ref: '#/components/messages/tilesExchanged'
       resignIn:
         $ref: '#/components/messages/resignIn'
       turnPassed:
@@ -343,6 +362,8 @@ operations:
       - $ref: '#/channels/rooms/messages/gameStarted'
       - $ref: '#/channels/rooms/messages/wordChecked'
       - $ref: '#/channels/rooms/messages/turnPassed'
+      - $ref: '#/channels/rooms/messages/exchanged'
+      - $ref: '#/channels/rooms/messages/tilesExchanged'
       - $ref: '#/channels/rooms/messages/gameOver'
       - $ref: '#/channels/rooms/messages/boardUpdated'
       - $ref: '#/channels/rooms/messages/roomError'
@@ -360,6 +381,7 @@ operations:
       - $ref: '#/channels/rooms/messages/startIn'
       - $ref: '#/channels/rooms/messages/submitIn'
       - $ref: '#/channels/rooms/messages/passIn'
+      - $ref: '#/channels/rooms/messages/exchangeIn'
       - $ref: '#/channels/rooms/messages/resignIn'
 
   sendJoined:
@@ -376,6 +398,8 @@ operations:
       - $ref: '#/channels/join/messages/gameStarted'
       - $ref: '#/channels/join/messages/wordChecked'
       - $ref: '#/channels/join/messages/turnPassed'
+      - $ref: '#/channels/join/messages/exchanged'
+      - $ref: '#/channels/join/messages/tilesExchanged'
       - $ref: '#/channels/join/messages/gameOver'
       - $ref: '#/channels/join/messages/boardUpdated'
       - $ref: '#/channels/join/messages/joinError'
@@ -395,6 +419,8 @@ operations:
       - $ref: '#/channels/match/messages/gameStarted'
       - $ref: '#/channels/match/messages/wordChecked'
       - $ref: '#/channels/match/messages/turnPassed'
+      - $ref: '#/channels/match/messages/exchanged'
+      - $ref: '#/channels/match/messages/tilesExchanged'
       - $ref: '#/channels/match/messages/gameOver'
       - $ref: '#/channels/match/messages/boardUpdated'
       - $ref: '#/channels/match/messages/roomError'
@@ -415,6 +441,7 @@ operations:
       - $ref: '#/channels/match/messages/startIn'
       - $ref: '#/channels/match/messages/submitIn'
       - $ref: '#/channels/match/messages/passIn'
+      - $ref: '#/channels/match/messages/exchangeIn'
       - $ref: '#/channels/match/messages/resignIn'
 
   receiveChatFromGuest:
@@ -430,6 +457,7 @@ operations:
       - $ref: '#/channels/join/messages/startIn'
       - $ref: '#/channels/join/messages/submitIn'
       - $ref: '#/channels/join/messages/passIn'
+      - $ref: '#/channels/join/messages/exchangeIn'
       - $ref: '#/channels/join/messages/resignIn'
 
 components:
@@ -1554,6 +1582,134 @@ components:
             type: history
             messages: []
 
+    exchangeIn:
+      name: exchange (보내는 쪽)
+      title: 칩 교환
+      summary: 손패의 칩을 가방의 새 칩과 바꿉니다. **차례를 씁니다.**
+      description: |
+        ```javascript
+        ws.send(JSON.stringify({ type: "exchange", tiles: ["Q", "V", "Z"] }));
+        ```
+
+        낼 단어가 없을 때 쓰는 수입니다. **넘기기와 다릅니다** — 넘기기는
+        다음 차례에도 똑같이 막혀 있지만, 교환은 손패를 바꿔서 상황 자체를
+        바꿉니다. 대신 한 턴을 통째로 버리는 값을 치릅니다.
+
+        `tiles` 에는 **내놓을 칩을 손에 있는 그대로** 적습니다.
+        빈 타일도 `"?"` 로 적어 바꿀 수 있습니다.
+        (`submit` 과 다릅니다. 저쪽은 "이 글자를 놓겠다"라 빈 타일로
+         대신할 수 있지만, 여기는 "이 칩을 내놓겠다"라 대신할 게 없습니다)
+
+        규칙:
+          - **자기 차례에만**
+          - 1~7개
+          - 손에 있는 칩만
+          - **가방에 7개 미만이면 못 바꿉니다.** 막바지에 서로 교환만
+            반복하면 게임이 영영 안 끝나기 때문입니다
+
+        ⚠️ **넘기기 횟수에 함께 셉니다.** 칩을 안 냈으니 넘긴 것과 같습니다.
+        교환·넘기기를 합쳐 **3번 연속이면 게임이 끝납니다.**
+        누가 실제로 칩을 놓으면 0으로 돌아갑니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, tiles]
+        properties:
+          type: {type: string, const: exchange}
+          tiles:
+            type: array
+            minItems: 1
+            maxItems: 7
+            items: {type: string, minLength: 1, maxLength: 1}
+            description: 내놓을 칩. 손에 있는 그대로 (빈 타일은 `"?"`)
+      examples:
+        - name: 세 개 바꾸기
+          payload: {type: exchange, tiles: [Q, V, Z]}
+
+    exchanged:
+      name: exchanged
+      title: 교환 결과 (나에게만)
+      summary: 바꾼 사람에게만 가는 **새 손패**입니다.
+      description: |
+        `tiles_exchanged` 와 짝입니다. 이쪽은 **바꾼 사람에게만** 가고
+        새 손패가 들어 있습니다. 상대에게 보내면 내 칩을 알려주는 셈입니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, count, rack, drawn, tiles_left]
+        properties:
+          type: {type: string, const: exchanged}
+          count: {type: integer, description: 바꾼 개수}
+          rack:
+            type: array
+            items: {type: string}
+            description: '**바꾼 뒤의 내 손패.** 여전히 7개입니다'
+          drawn:
+            type: array
+            items: {type: string}
+            description: 이번에 **새로 받은 칩**
+          tiles_left:
+            type: integer
+            description: |
+              가방에 남은 개수. **바뀌지 않습니다** — 뽑은 만큼 도로
+              넣기 때문입니다.
+      examples:
+        - name: 세 개 바꿈
+          payload:
+            type: exchanged
+            count: 3
+            rack: [E, A, R, S, T, L, I]
+            drawn: [S, T, L]
+            tiles_left: 84
+
+    tilesExchanged:
+      name: tiles_exchanged
+      title: 상대가 칩을 바꿈
+      summary: 누군가 칩을 바꿨습니다. **양쪽 모두에게** 갑니다.
+      description: |
+        **몇 개를 바꿨는지만** 옵니다. 무엇을 내놓고 무엇을 받았는지는
+        알려주지 않습니다. 그걸 알면 상대 손패를 좁혀 나갈 수 있습니다.
+
+        차례가 넘어가고, `passes` 가 하나 오릅니다.
+        `passes` 가 3이 되면 **바로 뒤에 `game_over` 가 옵니다.**
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, by, count, turn, your_turn, passes, passes_until_end,
+                   tiles_left, scores]
+        properties:
+          type: {type: string, const: tiles_exchanged}
+          by: {type: string, description: 바꾼 사람의 닉네임}
+          count: {type: integer, description: 바꾼 개수 (무엇인지는 안 옴)}
+          turn: {type: string, description: 이제 누구 차례인지 (화면 표시용)}
+          your_turn:
+            type: boolean
+            description: '**받는 사람 본인의 차례인가.** 판단은 이걸로. (사람마다 다른 값)'
+          passes:
+            type: integer
+            description: 연속으로 칩을 안 낸 횟수. **교환도 넘기기와 함께 셉니다**
+          passes_until_end:
+            type: integer
+            description: 몇 번 더 안 내면 게임이 끝나는지
+          tiles_left: {type: integer, description: 가방에 남은 개수}
+          scores:
+            type: object
+            properties:
+              host: {type: integer}
+              guest: {type: integer}
+      examples:
+        - name: 수진님이 3개를 바꿈
+          payload:
+            type: tiles_exchanged
+            by: 수진
+            count: 3
+            turn: 엘리
+            your_turn: true
+            passes: 1
+            passes_until_end: 2
+            tiles_left: 84
+            scores: {host: 12, guest: 8}
+
     guestJoined:
       name: guest_joined
       title: 친구가 들어옴
@@ -1775,7 +1931,6 @@ components:
 #   끊기면 프론트엔드가 직접 다시 연결해야 합니다. (ws.onclose)
 # ─────────────────────────────────────────────────────────────
 x-not-implemented-yet:
-  - '**칩 교환** — 낼 게 없을 때 칩을 바꾸는 것. 지금은 넘기기(`pass`)만 됩니다'
   - 지난 판 다시 보기 — 끝난 판은 DB 에 결과만 남고, 어떤 수가 오갔는지는 안 남습니다
   - '판 되돌리기(무르기) · 칩 교환하기 · 차례 넘기고 쉬기(pass)'
   - 게임이 끝났다는 알림 (`game_over`). 상대가 나가면 `guest_left` / `partner_left` 로만 알 수 있습니다
@@ -1810,6 +1965,8 @@ x-screen-flow:
     화면: '**게임 화면** ← 여기서 전환. 받은 rack 으로 내 칩을 그리고, 상대는 뒷면 partner_tile_count 장'
   - 받은메시지: board_updated
     화면: '게임 화면 유지. `board` 를 다시 그리고, **`your_turn` 으로 내 차례 표시를 갱신**하세요'
+  - 받은메시지: tiles_exchanged
+    화면: '게임 화면 유지. "OO님이 칩 N개를 바꿨습니다" + `your_turn`·`passes_until_end` 갱신'
   - 받은메시지: turn_passed
     화면: '게임 화면 유지. `your_turn` 갱신 + `passes_until_end` 를 보여주세요 ("1번 더 넘기면 끝납니다")'
   - 받은메시지: game_over

@@ -1394,6 +1394,143 @@ async def pass_turn(websocket: WebSocket, room: LiveRoom, sender: str) -> None:
         await end_game(room, "passed", winner_is_host=winner_by_score(room))
 
 
+def take_named_tiles(rack: List[str], names: object) -> tuple:
+    """바꿀 칩을 손패에서 **이름 그대로** 골라 냅니다. `(남은 손패, 골라낸 칩)`.
+
+    `take_from_rack` 과 다릅니다. 저쪽은 "이 글자를 놓겠다"라서 없으면
+    빈 타일로 대신할 수 있지만, 여기는 **"이 칩을 내놓겠다"** 라서 대신할
+    것이 없습니다. 손에 있는 그대로여야 합니다.
+
+    그래서 빈 타일(`?`)도 그대로 적어 보냅니다. 빈 타일도 바꿀 수 있습니다.
+    """
+    if not isinstance(names, list) or not names:
+        raise SubmitError("바꿀 칩을 골라주세요")
+
+    if len(names) > RACK_SIZE:
+        raise SubmitError(f"한 번에 {RACK_SIZE}개까지만 바꿀 수 있습니다")
+
+    remaining = list(rack)
+    taken = []
+    for name in names:
+        if not isinstance(name, str) or len(name) != 1:
+            raise SubmitError("칩은 한 글자씩 적어주세요")
+        name = name.upper()
+        if name not in remaining:
+            raise SubmitError(f"손에 없는 칩입니다: {name}")
+        remaining.remove(name)
+        taken.append(name)
+
+    return remaining, taken
+
+
+async def exchange_tiles(
+    websocket: WebSocket, room: LiveRoom, sender: str, data: dict
+) -> None:
+    """손패의 칩을 가방의 새 칩과 바꿉니다. **차례를 씁니다.**
+
+    낼 단어가 없을 때 쓰는 수입니다. 넘기기는 다음 차례에도 똑같이 막혀
+    있지만, 교환은 손패를 바꿔서 상황 자체를 바꿉니다. 대신 한 턴을
+    통째로 버리는 값을 치릅니다.
+    """
+    if room.finished:
+        await websocket.send_json({"type": "error", "message": "이미 끝난 게임입니다"})
+        return
+
+    if not room.started or room.turn_is_host is None:
+        await websocket.send_json(
+            {"type": "error", "message": "아직 게임이 시작되지 않았습니다"}
+        )
+        return
+
+    if (websocket is room.host) is not room.turn_is_host:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": f"지금은 {room.turn_nickname}님 차례입니다",
+                "turn": room.turn_nickname,
+                "your_turn": False,
+            }
+        )
+        return
+
+    # 가방이 얼마 안 남았으면 바꿀 수 없습니다.
+    #
+    # 막바지에 서로 교환만 반복하면 게임이 영영 안 끝납니다. 원래
+    # 스크래블도 같은 이유로 막습니다.
+    if len(room.bag) < RACK_SIZE:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": f"가방에 칩이 {RACK_SIZE}개 미만이면 바꿀 수 없습니다 (남은 {len(room.bag)}개)",
+            }
+        )
+        return
+
+    is_host = websocket is room.host
+    my_rack = room.host_rack if is_host else room.guest_rack
+
+    try:
+        rest, given = take_named_tiles(my_rack, data.get("tiles"))
+    except SubmitError as e:
+        await websocket.send_json({"type": "error", "message": str(e)})
+        return
+
+    # **먼저 뽑고, 그다음 돌려놓습니다.**
+    #
+    # 순서가 반대면 방금 내놓은 칩을 그대로 다시 받을 수 있습니다.
+    # 그러면 바꾼 게 아니라 한 턴만 버린 셈이 됩니다.
+    drawn = draw_tiles(room.bag, len(given))
+
+    # 내놓은 칩을 가방에 도로 넣고 섞습니다. 안 넣으면 그 칩들이 게임에서
+    # 영영 사라져서, 100개라는 구성이 무너지고 "가방이 비었다"는 계산도
+    # 틀어집니다.
+    room.bag.extend(given)
+    _shuffler.shuffle(room.bag)
+
+    new_rack = rest + drawn
+    if is_host:
+        room.host_rack = new_rack
+    else:
+        room.guest_rack = new_rack
+
+    # 칩을 안 냈으니 **넘기기와 똑같이 셉니다.**
+    #
+    # "3번 연속 넘어가면 끝"이라는 규칙은 아무도 못 내는 판이 안 끝나는
+    # 걸 막으려는 것입니다. 교환만 반복해도 똑같이 안 끝나므로 함께
+    # 세어야 규칙이 제 몫을 합니다.
+    room.passes += 1
+    room.turn_is_host = not room.turn_is_host
+
+    # 바꾼 사람에게만: 새 손패와 새로 뽑은 칩.
+    await websocket.send_json(
+        {
+            "type": "exchanged",
+            "count": len(given),
+            "rack": new_rack,
+            "drawn": drawn,
+            "tiles_left": len(room.bag),
+        }
+    )
+
+    # 양쪽에게: **몇 개를 바꿨는지만.** 무엇을 내놓고 무엇을 받았는지는
+    # 알려주지 않습니다. 그걸 알면 상대 손패를 좁혀 나갈 수 있습니다.
+    update = {
+        "type": "tiles_exchanged",
+        "by": sender,
+        "count": len(given),
+        "turn": room.turn_nickname,
+        "passes": room.passes,
+        "passes_until_end": MAX_PASSES - room.passes,
+        "tiles_left": len(room.bag),
+        "scores": {"host": room.host_score, "guest": room.guest_score},
+    }
+    await send_quietly(room.host, {**update, "your_turn": room.turn_is_host is True})
+    await send_quietly(room.guest, {**update, "your_turn": room.turn_is_host is False})
+
+    if room.passes >= MAX_PASSES:
+        await end_game(room, "passed", winner_is_host=winner_by_score(room))
+
+
 async def resign_game(websocket: WebSocket, room: LiveRoom, sender: str) -> None:
     """나가기 버튼. 게임을 끝내고 **상대가 이긴 것**으로 합니다.
 
@@ -1862,7 +1999,7 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
         #
         # 둘 다 방(그리고 상대)이 있어야 뜻이 있는 요청이라 한 묶음으로
         # 처리합니다.
-        if data.get("type") in ("pass", "resign"):
+        if data.get("type") in ("pass", "resign", "exchange"):
             context = find_context()
             if context is None:
                 await websocket.send_json(
@@ -1872,6 +2009,8 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
 
             if data["type"] == "pass":
                 await pass_turn(websocket, context[0], sender_nickname)
+            elif data["type"] == "exchange":
+                await exchange_tiles(websocket, context[0], sender_nickname, data)
             else:
                 await resign_game(websocket, context[0], sender_nickname)
             continue
@@ -1884,7 +2023,8 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
                     "message": (
                         '{"type":"message","text":"..."} · {"type":"start"} · '
                         '{"type":"submit","tiles":[...]} · {"type":"pass"} · '
-                        '{"type":"resign"} 중 하나로 보내주세요'
+                        '{"type":"exchange","tiles":["Q"]} · {"type":"resign"} '
+                        '중 하나로 보내주세요'
                     ),
                 }
             )
