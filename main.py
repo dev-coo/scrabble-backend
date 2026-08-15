@@ -28,6 +28,7 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator
 from starlette.websockets import WebSocketState
 
 from db import get_connection
+from dictionary import MIN_WORD_LENGTH, WORD_COUNT, is_word
 from game_data import (
     BOARD_LAYOUT,
     BOARD_SIZE,
@@ -682,6 +683,148 @@ def deal_tiles(room: LiveRoom) -> None:
     room.bag = bag
 
 
+# ─────────────────────────────────────────────────────────────
+# 단어 제출 — 좌표를 받아 단어로 읽고, 사전에 있는지 본다
+#
+# 프론트엔드는 사용자가 **어느 칸에 어떤 글자를 놓았는지**를 보냅니다.
+# 백엔드는 그 좌표들을 순서대로 읽어 단어 하나를 만들고, 사전에 있는지
+# 확인해서 알려줍니다.
+#
+# 왜 단어가 아니라 좌표를 받는가:
+#   프론트엔드가 `{"word": "CAT"}` 처럼 완성된 단어만 보내면, 그게 판
+#   어디에 놓인 것인지 알 수 없습니다. 점수는 **어느 칸에 놓였는지**에
+#   따라 달라지고(글자 2배 칸 등), 판에 실제로 놓으려면 자리도 알아야
+#   합니다. 좌표가 원본이고 단어는 거기서 나오는 결과입니다.
+#
+# 왜 백엔드가 사전을 보는가:
+#   프론트엔드에서 판단하면 사용자가 그 코드를 고쳐서 아무 단어나
+#   통과시킬 수 있습니다. 점수가 걸린 판단은 서버 몫입니다.
+#
+# ⚠️ 지금 하는 것은 **사전 확인까지**입니다. 아래는 아직 안 합니다.
+#      · 판에 실제로 놓기 (보드 상태가 아직 없습니다)
+#      · 이미 놓인 타일과 이어지는지, 첫 수가 한가운데를 지나는지
+#      · 손에 그 칩을 정말 들고 있는지
+#      · 점수 계산
+#      · 차례 넘기기
+#    그래서 지금은 **"이 글자들이 단어인가"만** 답해 줍니다.
+# ─────────────────────────────────────────────────────────────
+
+
+class SubmitError(ValueError):
+    """제출한 좌표가 단어로 읽히지 않을 때. 메시지를 그대로 사용자에게 보냅니다."""
+
+
+def read_word(tiles: object) -> tuple:
+    """좌표 목록을 읽어 `(단어, 방향)` 을 돌려줍니다.
+
+    받는 모양:
+        [{"row": 7, "col": 7, "letter": "C"}, {"row": 7, "col": 8, "letter": "A"}, ...]
+
+    `row` 는 위에서부터, `col` 은 왼쪽부터 **0 부터** 셉니다.
+    `GET /api/game/setup` 의 `board[줄][칸]` 과 같은 방식입니다.
+
+    단어로 읽을 수 없으면 `SubmitError` 를 냅니다. 왜 안 되는지를 사용자
+    에게 그대로 알려줄 수 있게, 경우마다 다른 메시지를 답니다.
+    """
+    if not isinstance(tiles, list) or not tiles:
+        raise SubmitError("놓은 칩이 없습니다")
+
+    if len(tiles) > RACK_SIZE:
+        # 손에 7개뿐이라 한 번에 8개를 놓을 수는 없습니다.
+        raise SubmitError(f"한 번에 {RACK_SIZE}개까지만 놓을 수 있습니다")
+
+    if len(tiles) < MIN_WORD_LENGTH:
+        # 한 글자는 단어가 아닙니다. 원래 스크래블에서는 이미 놓인
+        # 단어에 한 글자만 붙일 수도 있지만, 아직 판에 아무것도 없어서
+        # 붙일 대상이 없습니다.
+        raise SubmitError(f"단어는 {MIN_WORD_LENGTH}글자 이상이어야 합니다")
+
+    placed = []
+    seen = set()
+    for tile in tiles:
+        if not isinstance(tile, dict):
+            raise SubmitError('칩은 {"row":7,"col":7,"letter":"C"} 모양이어야 합니다')
+
+        row, col, letter = tile.get("row"), tile.get("col"), tile.get("letter")
+
+        # bool 은 파이썬에서 int 로도 통해서, True 를 좌표로 넘기면
+        # 1 로 읽힙니다. 조용히 통과하면 엉뚱한 칸이 되므로 막습니다.
+        if not isinstance(row, int) or not isinstance(col, int) or isinstance(row, bool) or isinstance(col, bool):
+            raise SubmitError("row 와 col 은 정수여야 합니다")
+
+        if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
+            raise SubmitError(f"보드 밖입니다. row·col 은 0~{BOARD_SIZE - 1} 사이여야 합니다")
+
+        if not isinstance(letter, str) or len(letter) != 1 or not letter.isascii() or not letter.isalpha():
+            # 빈 타일(`?`)을 그대로 보내면 여기서 걸립니다. 빈 타일은
+            # **무슨 글자로 쓸지 정해서** 그 글자를 보내야 합니다.
+            # `?` 인 채로는 무슨 단어인지 판단할 수가 없습니다.
+            raise SubmitError('letter 는 알파벳 한 글자여야 합니다. 빈 타일은 쓸 글자를 정해서 보내주세요')
+
+        if (row, col) in seen:
+            # 같은 칸에 두 장을 놓을 수는 없습니다. 막지 않으면 뒤엣것이
+            # 앞엣것을 덮어써서, 사용자가 보낸 것과 다른 단어가 됩니다.
+            raise SubmitError("같은 칸에 두 번 놓았습니다")
+        seen.add((row, col))
+
+        placed.append((row, col, letter.upper()))
+
+    rows = {r for r, _c, _l in placed}
+    cols = {c for _r, c, _l in placed}
+
+    # 한 줄로 놓여야 합니다. 가로면 줄이 하나, 세로면 칸이 하나입니다.
+    if len(rows) == 1:
+        direction = "across"          # 가로
+        placed.sort(key=lambda t: t[1])
+        line = [c for _r, c, _l in placed]
+    elif len(cols) == 1:
+        direction = "down"            # 세로
+        placed.sort(key=lambda t: t[0])
+        line = [r for r, _c, _l in placed]
+    else:
+        raise SubmitError("한 줄로(가로 또는 세로) 놓아야 합니다")
+
+    # 사이가 비면 안 됩니다. 판에 아무것도 없어서 그 빈칸을 메워 줄
+    # 글자가 없기 때문입니다. (원래 스크래블에서는 이미 놓인 타일이
+    # 사이를 메울 수 있지만, 그건 보드 상태가 생긴 뒤의 이야기입니다)
+    if line != list(range(line[0], line[0] + len(line))):
+        raise SubmitError("칩 사이가 비어 있습니다. 붙여서 놓아주세요")
+
+    word = "".join(letter for _r, _c, letter in placed)
+    return word, direction, placed
+
+
+async def check_word(websocket: WebSocket, data: dict) -> None:
+    """제출한 좌표를 단어로 읽어 **사전에 있는지** 알려줍니다.
+
+    답은 **보낸 사람에게만** 갑니다. 아직 판에 놓는 게 아니라서 상대
+    화면에는 아무 변화가 없기 때문입니다. 상대에게도 보내면 "상대가
+    뭔가 시도했다"는 정보가 새어 나가는데, 그건 알려줄 이유가 없습니다.
+    """
+    try:
+        word, direction, placed = read_word(data.get("tiles"))
+    except SubmitError as e:
+        # 좌표가 잘못된 것은 **사용자의 실수**라 고쳐서 다시 보내면 됩니다.
+        await websocket.send_json({"type": "error", "message": str(e)})
+        return
+
+    valid = is_word(word)
+
+    await websocket.send_json(
+        {
+            "type": "word_checked",
+            "word": word,
+            "valid": valid,
+            "direction": direction,
+            "tiles": [
+                {"row": r, "col": c, "letter": letter} for r, c, letter in placed
+            ],
+            # 왜 안 됐는지 한 줄로 알려줍니다. 맞았으면 보낼 이유가 없습니다.
+            **({} if valid else {"reason": f"사전에 없는 단어입니다: {word}"}),
+        }
+    )
+
+
 def mark_room_started(code: str) -> datetime:
     """방을 "시작됨"으로 표시하고, **DB 가 찍은 시각**을 돌려줍니다.
 
@@ -866,24 +1009,37 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
             await start_game(websocket, room)
             continue
 
-        # ③ 우리가 아는 종류인가
+        # ③ 단어 제출인가
+        #
+        # 게임 시작과 달리 **누구나** 보낼 수 있습니다. 지금은 사전에
+        # 있는지 알려주기만 하고 판을 건드리지 않아서, 차례가 아닌
+        # 사람이 미리 확인해 봐도 상대에게 아무 영향이 없습니다.
+        # (차례를 지키게 하는 것은 판에 실제로 놓을 때 필요합니다)
+        if data.get("type") == "submit":
+            await check_word(websocket, data)
+            continue
+
+        # ④ 우리가 아는 종류인가
         if data.get("type") != "message":
             await websocket.send_json(
                 {
                     "type": "error",
-                    "message": '{"type":"message","text":"..."} 또는 {"type":"start"} 형식으로 보내주세요',
+                    "message": (
+                        '{"type":"message","text":"..."} · {"type":"start"} · '
+                        '{"type":"submit","tiles":[...]} 중 하나로 보내주세요'
+                    ),
                 }
             )
             continue
 
-        # ④ 내용이 규칙에 맞는가
+        # ⑤ 내용이 규칙에 맞는가
         try:
             text = clean_chat_text(str(data.get("text", "")))
         except ValueError as e:
             await websocket.send_json({"type": "error", "message": str(e)})
             continue
 
-        # ⑤ 건네줄 상대가 있는가
+        # ⑥ 건네줄 상대가 있는가
         context = find_context()
         if context is None:
             await websocket.send_json(
@@ -893,7 +1049,7 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
 
         room, partner = context
 
-        # ⑥ 먼저 저장하고, 그다음 건네줍니다.
+        # ⑦ 먼저 저장하고, 그다음 건네줍니다.
         #
         # 순서가 중요합니다. 건네준 뒤에 저장하면, 저장이 실패했을 때
         # **화면에는 떴는데 기록에는 없는** 말이 생깁니다. 나중에 대화를
