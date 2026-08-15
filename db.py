@@ -11,16 +11,26 @@
 #
 # 연결 확인:  .venv/bin/python db.py
 # ─────────────────────────────────────────────────────────────
+import os
+
 import psycopg
 
-# 교육용 로컬 DB라 접속 정보를 코드에 그대로 둡니다.
-# 실무에서는 환경변수(.env)로 빼서 저장소에 올리지 않습니다.
+# ⭐ 접속 정보는 **환경변수**에서 읽습니다.
+#
+# 예전에는 비밀번호까지 이 파일에 적혀 있었습니다. 내 컴퓨터에서만
+# 돌 때는 편했지만, 저장소는 공개되어 있어서 **비밀번호가 인터넷에
+# 그대로 올라가 있는 셈**이었습니다.
+#
+# 아래 기본값은 각자 컴퓨터에서 개발할 때 쓰던 그 값입니다. 그래서
+# 환경변수를 하나도 안 넣어도 지금까지처럼 그냥 돌아갑니다.
+# 서버에서는 진짜 비밀번호를 환경변수로 넣어 주고, 그 값은 서버 안에만
+# 있습니다(저장소에는 없습니다).
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "scrabble",
-    "user": "scrabble",
-    "password": "scrabble",
+    "host": os.environ.get("SCRABBLE_DB_HOST", "localhost"),
+    "port": int(os.environ.get("SCRABBLE_DB_PORT", "5432")),
+    "dbname": os.environ.get("SCRABBLE_DB_NAME", "scrabble"),
+    "user": os.environ.get("SCRABBLE_DB_USER", "scrabble"),
+    "password": os.environ.get("SCRABBLE_DB_PASSWORD", "scrabble"),
 }
 
 

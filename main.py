@@ -6,10 +6,10 @@
 # 직접 눌러볼 수 있습니다.
 #
 # 실행:  .venv/bin/uvicorn main:app --host 0.0.0.0 --port 11000
-#   - 리턴값 보기 : http://100.115.173.118:11000/
-#   - 프론트가 호출: http://100.115.173.118:11000/api/hello
-#   - 스와거 문서 : http://100.115.173.118:11000/docs
-#   - API 계약서  : http://100.115.173.118:11000/openapi.json
+#   - 리턴값 보기 : http://localhost:11000/
+#   - 프론트가 호출: http://localhost:11000/api/hello
+#   - 스와거 문서 : http://localhost:11000/docs
+#   - API 계약서  : http://localhost:11000/openapi.json
 # ─────────────────────────────────────────────────────────────
 import json
 import secrets
