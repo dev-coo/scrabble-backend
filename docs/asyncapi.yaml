@@ -216,6 +216,8 @@ channels:
     messages:
       joined:
         $ref: '#/components/messages/joined'
+      history:
+        $ref: '#/components/messages/history'
       hostLeft:
         $ref: '#/components/messages/hostLeft'
       chatIn:
@@ -368,6 +370,7 @@ operations:
     description: 들어가는 데 성공했는지 알려주고, 방장이 나가면 그것도 알려줍니다.
     messages:
       - $ref: '#/channels/join/messages/joined'
+      - $ref: '#/channels/join/messages/history'
       - $ref: '#/channels/join/messages/hostLeft'
       - $ref: '#/channels/join/messages/chatOut'
       - $ref: '#/channels/join/messages/gameStarted'
@@ -1500,6 +1503,57 @@ components:
             board: ['…15줄 × 15칸…']
             at: '2026-08-15T15:31:12.000000'
 
+    history:
+      name: history
+      title: 지난 대화
+      summary: 방에 들어간 직후, 그 방에서 **전에 오간 대화**가 옵니다.
+      description: |
+        `joined` **바로 뒤에** 옵니다. **들어온 사람에게만** 갑니다 —
+        방장은 그 대화를 처음부터 보고 있었으니 다시 보낼 이유가 없습니다.
+
+        대화는 계속 DB 에 저장돼 왔지만 꺼내 볼 방법이 없어서, 다시
+        들어오면 화면이 늘 비어 있었습니다. 저장만 하고 안 쓰는
+        기록이었습니다.
+
+        **오래된 것부터** 시간 순서로 옵니다. 화면에 위에서 아래로 그대로
+        그리면 됩니다.
+
+        대화가 없으면 **빈 목록**이 옵니다. 아예 안 보내지 않는 이유:
+        프론트엔드가 "아직 안 온 건가, 없는 건가"를 기다리게 되기 때문입니다.
+
+        최대 **100줄**입니다. 전부 보내면 오래된 방일수록 접속이 느려지고,
+        화면도 옛날 이야기부터 그리게 됩니다.
+
+        ⚠️ **방이 살아 있는 동안의 대화입니다.** 방장이 나가면 그 방은
+        끝나고, 다시 만든 방은 **다른 방**이라 대화도 처음부터입니다.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, messages]
+        properties:
+          type: {type: string, const: history}
+          messages:
+            type: array
+            description: 오래된 것부터 시간 순서로. 없으면 빈 목록.
+            items:
+              type: object
+              properties:
+                from: {type: string, description: 말한 사람의 닉네임}
+                text: {type: string, description: 내용}
+                at: {type: string, description: DB 가 저장하며 찍은 시각 (ISO 8601)}
+      examples:
+        - name: 지난 대화 3줄
+          payload:
+            type: history
+            messages:
+              - {from: 엘리, text: 안녕하세요, at: '2026-08-15T16:32:11.100000'}
+              - {from: 수진, text: 반가워요, at: '2026-08-15T16:32:19.400000'}
+              - {from: 엘리, text: 게임 할까요, at: '2026-08-15T16:32:25.900000'}
+        - name: 처음 들어간 방
+          payload:
+            type: history
+            messages: []
+
     guestJoined:
       name: guest_joined
       title: 친구가 들어옴
@@ -1744,6 +1798,8 @@ x-screen-flow:
     화면: 대기 화면 — 코드를 띄우고 친구를 기다림
   - 받은메시지: joined
     화면: 대기 화면 — 들어왔음
+  - 받은메시지: history
+    화면: '대기 화면. **지난 대화를 대화창에 채워** 주세요. `joined` 바로 뒤에 옵니다'
   - 받은메시지: waiting
     화면: 대기 화면 — 줄 서는 중
   - 받은메시지: matched

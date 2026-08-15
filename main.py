@@ -693,6 +693,35 @@ def insert_message(room_id: int, sender: str, text: str) -> datetime:
             return cur.fetchone()[0]
 
 
+# 접속했을 때 되돌려 주는 지난 대화의 최대 줄 수.
+#
+# 전부 보내면 오래된 방일수록 접속이 느려지고, 화면도 옛날 이야기부터
+# 그리게 됩니다. 사람이 거슬러 올라가 읽는 양은 이 정도면 충분합니다.
+HISTORY_LIMIT = 100
+
+
+def load_messages(room_id: int) -> List[dict]:
+    """그 방에서 오간 지난 대화를 **시간 순서로** 꺼내 옵니다.
+
+    최근 것부터 `HISTORY_LIMIT` 개를 가져온 뒤 **다시 뒤집어** 오래된
+    것부터 돌려줍니다. 최근 것을 고르려면 내림차순으로 꺼내야 하지만,
+    화면에 그릴 때는 위에서 아래로 시간이 흘러야 하기 때문입니다.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT sender, text, created_at FROM messages"
+                " WHERE room_id = %s ORDER BY id DESC LIMIT %s",
+                (room_id, HISTORY_LIMIT),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {"from": sender, "text": text, "at": created_at.isoformat()}
+        for sender, text, created_at in reversed(rows)
+    ]
+
+
 async def send_quietly(websocket: Optional[WebSocket], payload: dict) -> None:
     """상대에게 알림을 보내되, 이미 끊겼으면 조용히 넘어갑니다.
 
@@ -2287,6 +2316,19 @@ async def join_room(websocket: WebSocket, code: str, nickname: str = Query(defau
             "guest_nickname": guest_nickname,
         }
     )
+
+    # 이 방에서 **전에 오간 대화**를 되돌려 줍니다.
+    #
+    # 대화는 계속 DB 에 저장돼 왔지만 꺼내 볼 방법이 없어서, 다시 들어오면
+    # 화면이 늘 비어 있었습니다. 저장만 하고 안 쓰는 기록이었습니다.
+    #
+    # **들어온 사람에게만** 보냅니다. 방장은 그 대화를 처음부터 보고
+    # 있었으니 다시 보낼 이유가 없습니다.
+    #
+    # 대화가 없으면 빈 목록이 갑니다. 아예 안 보내지 않는 이유: 프론트가
+    # "아직 안 온 건가, 없는 건가"를 기다리게 되기 때문입니다.
+    history = await run_in_threadpool(load_messages, room.room_id)
+    await websocket.send_json({"type": "history", "messages": history})
 
     # 방장에게: **요청하지도 않았는데** 소식이 갑니다.
     # 이게 웹소켓으로 만든 이유 그 자체입니다. HTTP 였다면 방장은
