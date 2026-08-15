@@ -471,6 +471,15 @@ class LiveRoom:
         # 이번 게임에서 누가 먼저 두는가. 아직 시작 전이면 None.
         self.first_turn: Optional[str] = None
 
+        # 지금 누구 차례인가. `True` 면 방장, `False` 면 친구, `None` 이면
+        # 아직 시작 전입니다.
+        #
+        # 닉네임이 아니라 **자리(방장/친구)로** 들고 있는 이유:
+        # 두 사람이 둘 다 "수진"일 수 있습니다. 닉네임으로 차례를 따지면
+        # 그때 **상대 차례에도 내가 놓을 수 있게** 됩니다. 이름은 겹쳐도
+        # 자리는 겹치지 않습니다.
+        self.turn_is_host: Optional[bool] = None
+
         # ── 이번 판의 칩 ────────────────────────────────────
         #
         # 아직 아무에게도 가지 않은 타일들. 시작할 때 100개를 섞어 넣고,
@@ -495,6 +504,17 @@ class LiveRoom:
         # 한 표에 섞으면 게임이 끝날 때마다 규칙을 다시 만들어야 합니다.
         self.board: List[List[str]] = new_board()
 
+    @property
+    def turn_nickname(self) -> Optional[str]:
+        """지금 차례인 사람의 닉네임. **화면에 보여줄 때만** 씁니다.
+
+        판단에는 쓰지 마세요. 두 사람 이름이 같으면 구별이 안 됩니다.
+        누구 차례인지 따질 때는 `turn_is_host` 를 씁니다.
+        """
+        if self.turn_is_host is None:
+            return None
+        return self.host_nickname if self.turn_is_host else self.guest_nickname
+
     def clear_game(self) -> None:
         """이번 판을 없던 것으로 되돌립니다.
 
@@ -505,6 +525,7 @@ class LiveRoom:
         """
         self.started = False
         self.first_turn = None
+        self.turn_is_host = None
         self.bag = []
         self.host_rack = []
         self.guest_rack = []
@@ -967,6 +988,33 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
     실패하면 **보낸 사람에게만** 알립니다. 상대 화면에는 아무 변화가
     없고, "상대가 뭔가 시도했다가 실패했다"를 알려줄 이유도 없습니다.
     """
+    # 아직 시작 안 한 게임에는 놓을 수 없습니다. 시작 전에 놓이면 그 뒤에
+    # 칩을 나눠 줄 때 판에 이미 글자가 있는 이상한 상태가 됩니다.
+    if not room.started or room.turn_is_host is None:
+        await websocket.send_json(
+            {"type": "error", "message": "아직 게임이 시작되지 않았습니다"}
+        )
+        return
+
+    # **내 차례인가.**
+    #
+    # 판은 하나뿐입니다. 차례를 안 지키면 둘이 동시에 놓을 수 있고, 그러면
+    # 먼저 도착한 쪽이 이기는 경주가 됩니다. 순서가 있는 게임에서 그건
+    # 규칙이 없는 것과 같습니다.
+    #
+    # 닉네임이 아니라 **연결**로 판단합니다. 두 사람 이름이 같으면
+    # 닉네임 비교로는 상대 차례에도 내가 놓을 수 있게 됩니다.
+    if (websocket is room.host) is not room.turn_is_host:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": f"지금은 {room.turn_nickname}님 차례입니다",
+                "turn": room.turn_nickname,
+                "your_turn": False,
+            }
+        )
+        return
+
     try:
         placed = parse_tiles(data.get("tiles"))
         direction = check_placement(room.board, placed)
@@ -1009,8 +1057,12 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
         )
         return
 
-    # 전부 통과했으니 이제 진짜 판에 옮깁니다.
+    # 전부 통과했으니 이제 진짜 판에 옮기고 **차례를 넘깁니다.**
+    #
+    # 차례를 넘기는 건 놓기가 완전히 끝난 뒤여야 합니다. 먼저 넘기면
+    # 중간에 문제가 생겼을 때 아무도 안 놓았는데 차례만 넘어갑니다.
     room.board = trial
+    room.turn_is_host = not room.turn_is_host
 
     await websocket.send_json(
         {
@@ -1030,9 +1082,13 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
         "tiles": [{"row": r, "col": c, "letter": l} for r, c, l in placed],
         "words": [w["word"] for w in checked],
         "board": room.board,
+        # 이제 누구 차례인지. 방금 놓은 사람의 **상대**입니다.
+        "turn": room.turn_nickname,
     }
-    await send_quietly(room.host, update)
-    await send_quietly(room.guest, update)
+    # `your_turn` 만 사람마다 다릅니다. 이름이 같을 수 있어서 닉네임
+    # 비교로는 내 차례인지 알 수 없기 때문입니다.
+    await send_quietly(room.host, {**update, "your_turn": room.turn_is_host is True})
+    await send_quietly(room.guest, {**update, "your_turn": room.turn_is_host is False})
 
 
 def mark_room_started(code: str) -> datetime:
@@ -1101,9 +1157,14 @@ async def start_game(websocket: WebSocket, room: LiveRoom) -> None:
     # 스크래블에서 선공은 유리한 자리라, 방을 만들었다는 이유만으로
     # 매번 먼저 두게 하면 공평하지 않습니다.
     #
+    # 닉네임 둘 중에서 고르지 않고 **자리(방장이냐 아니냐)를** 고릅니다.
+    # 두 사람 이름이 같으면("수진" 대 "수진") 이름으로 고른 값은 누구를
+    # 가리키는지 알 수 없게 됩니다.
+    #
     # `random` 이 아니라 `secrets` 를 쓰는 것은 초대 코드와 같은 이유로,
     # 다음 값을 예측당하지 않기 위해서입니다.
-    room.first_turn = secrets.choice([room.host_nickname, room.guest_nickname])
+    room.turn_is_host = secrets.choice([True, False])
+    room.first_turn = room.turn_nickname
 
     # 칩을 섞어 각자 7개씩 나눠 줍니다.
     #
@@ -1139,6 +1200,10 @@ async def start_game(websocket: WebSocket, room: LiveRoom) -> None:
         "host_nickname": room.host_nickname,
         "guest_nickname": room.guest_nickname,
         "first_turn": room.first_turn,
+        # `first_turn` 은 "이 게임의 선공"이라 끝까지 안 바뀌고,
+        # `turn` 은 "지금 차례"라 한 수마다 바뀝니다. 시작 시점에는 둘이
+        # 같은 값이지만 뜻이 다릅니다.
+        "turn": room.turn_nickname,
         "at": started_at.isoformat(),
         # 가방에 남은 개수는 양쪽 다 알아도 되는 값입니다. 실제 스크래블
         # 에서도 남은 타일 수는 서로 볼 수 있습니다. (무엇이 남았는지는 아님)
@@ -1152,13 +1217,27 @@ async def start_game(websocket: WebSocket, room: LiveRoom) -> None:
 
     # `rack` 은 **받는 사람 자기 것**입니다. 상대 것은 개수만 보냅니다.
     # 프론트엔드가 상대 칩을 뒷면으로 몇 장 그릴지 알아야 하기 때문입니다.
+    #
+    # `your_turn` 도 사람마다 다릅니다. `turn` 에 닉네임이 있긴 하지만,
+    # 두 사람 이름이 같으면 프론트엔드가 **내 차례인지 알 수 없습니다.**
+    # 그래서 각자에게 참·거짓으로 따로 알려줍니다.
     await send_quietly(
         room.host,
-        {**common, "rack": room.host_rack, "partner_tile_count": len(room.guest_rack)},
+        {
+            **common,
+            "rack": room.host_rack,
+            "partner_tile_count": len(room.guest_rack),
+            "your_turn": room.turn_is_host is True,
+        },
     )
     await send_quietly(
         room.guest,
-        {**common, "rack": room.guest_rack, "partner_tile_count": len(room.host_rack)},
+        {
+            **common,
+            "rack": room.guest_rack,
+            "partner_tile_count": len(room.host_rack),
+            "your_turn": room.turn_is_host is False,
+        },
     )
 
 
