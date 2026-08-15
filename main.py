@@ -495,6 +495,17 @@ class LiveRoom:
         self.host_rack: List[str] = []
         self.guest_rack: List[str] = []
 
+        # 판에서 **빈 타일로 놓인 자리들** `{(row, col), ...}`.
+        #
+        # 판(`board`)은 글자만 기억합니다. 빈 타일을 `S` 로 놓으면 판에는
+        # `S` 라고만 남아서, 나중에 그 칸을 지나는 단어를 셀 때 **진짜 S
+        # 처럼 1점을 매기게 됩니다.** 빈 타일은 언제나 0점이라 틀린 값입니다.
+        #
+        # 판에 `S*` 처럼 표시를 섞지 않고 따로 두는 이유: 그러면 판을 읽는
+        # 곳마다 "별표를 떼고 봐야 하나"를 신경 써야 합니다. 글자는 글자대로
+        # 두고, 성격은 옆에 적어 두는 편이 단순합니다.
+        self.blank_spots = set()
+
         # 지금 판에 무엇이 놓여 있는가. 15×15 이고 빈 칸은 빈 문자열입니다.
         #
         # **두 사람이 함께 보는 판은 하나뿐**이고, 그 하나가 여기입니다.
@@ -558,6 +569,7 @@ class LiveRoom:
         self.guest_score = 0
         self.finished = False
         self.passes = 0
+        self.blank_spots = set()
         # 판도 비웁니다. 안 비우면 지난 판에 놓인 글자 위에서 새 게임이
         # 시작돼, 첫 수부터 "이미 글자가 있는 칸"이라고 막힙니다.
         self.board = new_board()
@@ -857,7 +869,17 @@ def parse_tiles(tiles: object) -> List[tuple]:
             raise SubmitError("같은 칸에 두 번 놓았습니다")
         seen.add((row, col))
 
-        placed.append((row, col, letter.upper()))
+        # 이 자리에 놓은 게 **빈 타일인가.**
+        #
+        # 프론트엔드가 알려주지 않으면 서버는 알 수 없습니다. `S` 만 보고는
+        # 진짜 S 를 놓은 건지 빈 타일을 S 로 쓴 건지 구분이 안 됩니다.
+        # 그런데 **빈 타일은 0점**이라 이걸 모르면 점수가 틀립니다.
+        #
+        # 안 보내면 진짜 글자로 봅니다. 손에 그 글자가 없으면 그때만
+        # 빈 타일을 쓴 것으로 처리합니다. (그것 말고는 놓을 방법이 없으니까요)
+        is_blank = bool(tile.get("blank", False))
+
+        placed.append((row, col, letter.upper(), is_blank))
 
     return placed
 
@@ -868,14 +890,14 @@ def check_placement(board: List[List[str]], placed: List[tuple]) -> str:
     놓을 수 없으면 `SubmitError` 를 냅니다.
     """
     # ① 이미 글자가 있는 칸에는 못 놓습니다.
-    for row, col, _letter in placed:
+    for row, col, *_ in placed:
         if board[row][col] != EMPTY:
             raise SubmitError(
                 f"이미 글자가 있는 칸입니다 ({row}, {col}): {board[row][col]}"
             )
 
-    rows = {r for r, _c, _l in placed}
-    cols = {c for _r, c, _l in placed}
+    rows = {r for r, _c, *_ in placed}
+    cols = {c for _r, c, *_ in placed}
 
     # ④-1 한 줄로 놓여야 합니다.
     #
@@ -918,7 +940,7 @@ def check_placement(board: List[List[str]], placed: List[tuple]) -> str:
         # ② 첫 수는 한가운데(별표)를 지나야 합니다. 이 규칙이 없으면
         #    구석에서 시작할 수 있고, 그러면 보드 가운데의 점수 칸들이
         #    아무 의미가 없어집니다.
-        if not any(r == CENTER and c == CENTER for r, c, _l in placed):
+        if not any(r == CENTER and c == CENTER for r, c, *_ in placed):
             raise SubmitError(
                 f"첫 단어는 한가운데({CENTER}, {CENTER})를 지나야 합니다"
             )
@@ -927,7 +949,7 @@ def check_placement(board: List[List[str]], placed: List[tuple]) -> str:
         #    놓을 수 있으면 한 판에 서로 상관없는 단어가 흩어지게 되는데,
         #    그건 스크래블이 아닙니다.
         touching = False
-        for row, col, _letter in placed:
+        for row, col, *_ in placed:
             for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 r, c = row + dr, col + dc
                 if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE and board[r][c] != EMPTY:
@@ -998,11 +1020,11 @@ def words_formed(
             found.append(word)
 
     # 놓은 방향으로 이어지는 **주 단어** 하나.
-    row, col, _letter = placed[0]
+    row, col = placed[0][0], placed[0][1]
     add(_read_line(board, row, col, along))
 
     # 놓은 글자 하나하나가 만드는 **교차 단어**들.
-    for row, col, _letter in placed:
+    for row, col, *_ in placed:
         add(_read_line(board, row, col, across_))
 
     return found
@@ -1040,12 +1062,21 @@ def take_from_rack(rack: List[str], placed: List[tuple]) -> tuple:
     remaining = list(rack)
     used = []
 
-    for _row, _col, letter in placed:
-        if letter in remaining:
+    for _row, _col, letter, is_blank in placed:
+        if is_blank:
+            # 프론트엔드가 **빈 타일이라고 알려준** 경우입니다. 이때는
+            # 진짜 글자가 손에 있어도 빈 타일을 씁니다. 사용자가 그렇게
+            # 정한 것이니 서버가 뒤집으면 안 됩니다.
+            if BLANK not in remaining:
+                raise SubmitError("손에 빈 타일이 없습니다")
+            remaining.remove(BLANK)
+            used.append(BLANK)
+        elif letter in remaining:
             remaining.remove(letter)
             used.append(letter)
         elif BLANK in remaining:
             # 진짜 글자가 없으니 빈 타일을 그 글자로 쓴 것입니다.
+            # (프론트엔드가 표시를 안 보냈지만 이것 말고는 방법이 없습니다)
             remaining.remove(BLANK)
             used.append(BLANK)
         else:
@@ -1095,7 +1126,10 @@ def score_word(word: dict, fresh: set, blanks: set) -> int:
     """단어 하나의 점수를 냅니다.
 
     `fresh`  = 이번에 새로 놓은 자리들 `{(row, col), ...}`
-    `blanks` = 그중 빈 타일로 놓은 자리들
+    `blanks` = **판에 놓인 빈 타일 자리 전부.** 이번에 놓은 것뿐 아니라
+               예전에 놓인 것도 들어 있어야 합니다. 빈 타일은 한 번
+               놓이면 계속 0점이고, 나중에 그 칸을 지나는 단어에서도
+               0점이어야 하기 때문입니다.
     """
     total = 0
     word_multipliers = []
@@ -1125,7 +1159,9 @@ def score_word(word: dict, fresh: set, blanks: set) -> int:
     return total
 
 
-def score_move(words: List[dict], placed: List[tuple], used: List[str]) -> dict:
+def score_move(
+    words: List[dict], placed: List[tuple], used: List[str], board_blanks=None
+) -> dict:
     """이번 수의 점수를 냅니다.
 
     `words` 는 이번에 새로 생긴 단어 전부입니다. **하나가 아닐 수 있고,
@@ -1135,12 +1171,18 @@ def score_move(words: List[dict], placed: List[tuple], used: List[str]) -> dict:
     `used` 는 손패에서 실제로 꺼낸 칩입니다. `placed` 와 순서가 같아서,
     몇 번째 자리가 빈 타일이었는지 여기서 알 수 있습니다.
     """
-    fresh = {(row, col) for row, col, _letter in placed}
-    blanks = {
+    fresh = {(row, col) for row, col, *_ in placed}
+
+    # 이번에 빈 타일로 놓은 자리. `used` 는 손패에서 실제로 꺼낸 칩이라
+    # `placed` 와 순서가 같습니다.
+    new_blanks = {
         (placed[i][0], placed[i][1])
         for i, tile in enumerate(used)
         if tile == BLANK
     }
+    # 판에 이미 놓여 있던 빈 타일까지 합쳐야 합니다. 안 그러면 예전에
+    # 놓인 빈 타일이 지금 만들어지는 단어에서 진짜 글자로 계산됩니다.
+    blanks = new_blanks | set(board_blanks or ())
 
     scored = [
         {"word": w["word"], "score": score_word(w, fresh, blanks)} for w in words
@@ -1155,6 +1197,9 @@ def score_move(words: List[dict], placed: List[tuple], used: List[str]) -> dict:
         "words_score": words_total,
         "bingo": bingo,
         "total": words_total + bingo,
+        # 이번에 빈 타일로 놓은 자리. 호출한 쪽이 판에 기억해 둘 수 있게
+        # 함께 돌려줍니다.
+        "_new_blanks": sorted(new_blanks),
     }
 
 
@@ -1401,7 +1446,7 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
     # 틀렸을 때 되돌려야 하는데 그 되돌리기를 빠뜨리면 엉터리 글자가
     # 판에 남습니다. 베낀 판에서 확인하고 통과할 때만 진짜에 옮깁니다.
     trial = [line[:] for line in room.board]
-    for row, col, letter in placed:
+    for row, col, letter, *_ in placed:
         trial[row][col] = letter
 
     words = words_formed(trial, placed, direction)
@@ -1440,7 +1485,12 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
 
     # 점수를 냅니다. **판에 올린 뒤·보너스 칸을 쓰기 전**이라, 이번에 새로
     # 놓은 자리의 보너스가 그대로 적용됩니다.
-    score = score_move(words, placed, used)
+    score = score_move(words, placed, used, board_blanks=room.blank_spots)
+
+    # 이번에 빈 타일로 놓은 자리를 판에 기억해 둡니다. 안 해두면 다음
+    # 수에서 이 칸이 진짜 글자로 계산됩니다.
+    new_blank_spots = {tuple(spot) for spot in score.pop("_new_blanks")}
+    room.blank_spots |= new_blank_spots
     if is_host:
         room.host_score += score["total"]
     else:
@@ -1486,9 +1536,15 @@ async def check_word(websocket: WebSocket, room: LiveRoom, sender: str, data: di
         "type": "board_updated",
         "by": sender,
         "direction": direction,
-        "tiles": [{"row": r, "col": c, "letter": l} for r, c, l in placed],
+        "tiles": [
+            {"row": r, "col": c, "letter": l, "blank": (r, c) in new_blank_spots}
+            for r, c, l, _b in placed
+        ],
         "words": [w["word"] for w in checked],
         "board": room.board,
+        # 판에서 빈 타일로 놓인 자리들. 화면에서 그 칸을 다르게 그리고
+        # (0점이니까) 점수를 설명할 때 씁니다.
+        "blank_spots": [[r, c] for r, c in sorted(room.blank_spots)],
         # 이제 누구 차례인지. 방금 놓은 사람의 **상대**입니다.
         "turn": room.turn_nickname,
         # 가방에 남은 개수. 양쪽 다 알아도 되는 값입니다.

@@ -86,7 +86,8 @@ info:
     보너스 칸은 **이번에 새로 놓은 자리에서만** 걸립니다. 이미 놓인 글자가
     밟고 있는 칸은 그때 이미 썼습니다.
 
-    빈 타일은 **0점**입니다.
+    빈 타일은 **0점**입니다. 빈 타일을 놓을 때는 쓸 글자와 함께
+    **`blank: true`** 를 보내세요. 안 보내면 서버가 진짜 글자로 봅니다.
 
     ## 게임 끝내기
 
@@ -995,6 +996,22 @@ components:
                   description: |
                     알파벳 한 글자. 소문자로 보내도 됩니다.
                     **빈 타일은 `?` 가 아니라 쓸 글자를 보내세요.**
+                blank:
+                  type: boolean
+                  default: false
+                  description: |
+                    **이 자리에 놓은 것이 빈 타일인가.**
+
+                    빈 타일을 `S` 로 쓰면 `letter` 는 `"S"` 가 되고, 서버는
+                    그것만으로는 **진짜 S 인지 빈 타일인지 구분할 수 없습니다.**
+                    빈 타일은 **0점**이라 이걸 모르면 점수가 틀립니다.
+
+                    안 보내면 진짜 글자로 봅니다. 손에 그 글자가 없을 때만
+                    빈 타일을 쓴 것으로 처리합니다.
+
+                    `true` 로 보내면 **진짜 글자가 손에 있어도** 빈 타일을
+                    씁니다. 사용자가 그렇게 정한 것이니까요.
+                    손에 빈 타일이 없으면 `손에 빈 타일이 없습니다` 가 옵니다.
       examples:
         - name: 한가운데에 가로로 CAT
           payload:
@@ -1002,7 +1019,7 @@ components:
             tiles:
               - {row: 7, col: 7, letter: C}
               - {row: 7, col: 8, letter: A}
-              - {row: 7, col: 9, letter: T}
+              - {row: 7, col: 9, letter: T, blank: true}   # 빈 타일을 T 로 씀
 
     wordChecked:
       name: word_checked
@@ -1176,8 +1193,8 @@ components:
       contentType: application/json
       payload:
         type: object
-        required: [type, by, direction, tiles, words, board, turn, your_turn,
-                   tiles_left, partner_tile_count, score, scores]
+        required: [type, by, direction, tiles, words, board, blank_spots, turn,
+                   your_turn, tiles_left, partner_tile_count, score, scores]
         properties:
           type:
             type: string
@@ -1199,6 +1216,9 @@ components:
                 row: {type: integer, description: 위에서부터 몇 번째 줄인지 (0 부터)}
                 col: {type: integer, description: 왼쪽부터 몇 번째 칸인지 (0 부터)}
                 letter: {type: string, description: 놓인 글자 (대문자)}
+                blank:
+                  type: boolean
+                  description: '이 칩이 **빈 타일**인가. 화면에서 다르게 그리세요 (0점입니다)'
           words:
             type: array
             items: {type: string}
@@ -1211,6 +1231,18 @@ components:
             items:
               type: array
               items: {type: string}
+          blank_spots:
+            type: array
+            description: |
+              **판에서 빈 타일로 놓인 자리 전부** `[[row, col], ...]`.
+              이번 수만이 아니라 지금까지 놓인 것 전부입니다.
+
+              `board` 에는 글자만 들어 있어서, 어느 칸이 빈 타일인지
+              구분할 수 없습니다. 그 칸은 **0점**이라 화면에서도 다르게
+              그려야 하고, 점수를 설명할 때도 필요합니다.
+            items:
+              type: array
+              items: {type: integer}
           turn:
             type: string
             description: |
@@ -1265,6 +1297,7 @@ components:
               - {row: 7, col: 8, letter: T}
             words: [CAT]
             board: ['…15줄 × 15칸…']
+            blank_spots: [[7, 8]]
             turn: 엘리
             your_turn: false
             tiles_left: 83
@@ -1690,7 +1723,6 @@ components:
 x-not-implemented-yet:
   - '**칩 교환** — 낼 게 없을 때 칩을 바꾸는 것. 지금은 넘기기(`pass`)만 됩니다'
   - 지난 판 다시 보기 — 끝난 판은 DB 에 결과만 남고, 어떤 수가 오갔는지는 안 남습니다
-  - '**빈 타일을 어느 칸에 썼는지** — 프론트에서 `S` 로 보내면 서버는 그게 진짜 S 였는지 빈 타일이었는지 모릅니다. 진짜 글자를 먼저 쓰는 규칙으로 처리하지만, 점수를 정확히 매기려면 `blank: true` 같은 표시를 계약에 넣어야 합니다'
   - '판 되돌리기(무르기) · 칩 교환하기 · 차례 넘기고 쉬기(pass)'
   - 게임이 끝났다는 알림 (`game_over`). 상대가 나가면 `guest_left` / `partner_left` 로만 알 수 있습니다
   - (랜덤 매칭) **자기가 방장인지 알 방법** — `matched` 에 그 정보가 없어서, `start` 를 눌러보기 전에는 모릅니다
