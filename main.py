@@ -27,7 +27,17 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import AfterValidator, BaseModel, Field, field_validator
 from starlette.websockets import WebSocketState
 
+import sentry
 from db import get_connection
+
+# 에러 추적을 **앱을 만들기 전에** 켭니다.
+#
+# 순서가 중요합니다. Sentry 는 켜질 때 FastAPI 에 자기 부품을 끼워 넣는데,
+# 앱이 이미 만들어진 뒤에 켜면 그 부품이 들어갈 자리를 놓칩니다.
+# 그러면 오류가 나도 조용히 안 올라갑니다.
+#
+# `SENTRY_DSN` 환경변수가 없으면 아무 일도 안 일어납니다.
+SENTRY_ON = sentry.setup()
 from dictionary import MIN_WORD_LENGTH, WORD_COUNT, is_word
 from game_data import (
     BLANK,
@@ -381,6 +391,7 @@ def delete_player(player_id: int):
 #    쓴 명세서 `docs/ws-contract.md` 가 계약서 역할을 합니다.
 # ─────────────────────────────────────────────────────────────
 @app.websocket("/ws")
+@sentry.catch_ws
 async def websocket_endpoint(websocket: WebSocket):
     """연결을 받아주고, 받은 말을 그대로 되돌려 줍니다. (메아리)
 
@@ -2101,6 +2112,7 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
 
 
 @app.websocket("/ws/rooms")
+@sentry.catch_ws
 async def host_room(websocket: WebSocket, nickname: str = Query(default="")):
     """방을 만들고, 친구가 들어올 때까지 연결을 붙잡은 채 기다립니다.
 
@@ -2333,6 +2345,7 @@ async def join_queue(me: Waiter, front: bool = False) -> None:
 
 
 @app.websocket("/ws/match")
+@sentry.catch_ws
 async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
     """아무나 기다리는 사람과 짝지어 줍니다.
 
@@ -2421,6 +2434,7 @@ async def match_random(websocket: WebSocket, nickname: str = Query(default="")):
 
 
 @app.websocket("/ws/rooms/{code}")
+@sentry.catch_ws
 async def join_room(websocket: WebSocket, code: str, nickname: str = Query(default="")):
     """초대 코드로 친구의 방에 들어갑니다.
 
