@@ -28,11 +28,94 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator
 from starlette.websockets import WebSocketState
 
 from db import get_connection
+from game_data import (
+    BOARD_LAYOUT,
+    BOARD_SIZE,
+    CENTER,
+    PREMIUM_LEGEND,
+    RACK_SIZE,
+    TILE_DISTRIBUTION,
+    TOTAL_TILES,
+    build_bag,
+)
+
+# 스와거(`/docs`) 첫 화면에 뜨는 설명입니다. 마크다운이 그대로 그려집니다.
+#
+# 여기에 **웹소켓 안내를 크게 적어 두는 이유**: 스와거는 HTTP API 만
+# 자동으로 그립니다. `@app.websocket()` 으로 만든 경로는 아무리 많이
+# 만들어도 이 화면에 한 줄도 나오지 않습니다.
+#
+# 그래서 스와거만 본 사람은 이 백엔드에 방·채팅·게임 시작이 있다는 사실을
+# **알 방법이 없습니다.** 실제로 지금 기능의 대부분이 웹소켓 쪽에 있는데
+# 스와거에는 플레이어 API 다섯 개만 보입니다. 그 오해를 막는 게 이 글의
+# 역할입니다.
+API_DESCRIPTION = """
+스크래블 백엔드입니다. **이 화면(스와거)에는 HTTP API 만 나옵니다.**
+
+## ⚠️ 이 백엔드 기능의 대부분은 이 화면에 없습니다
+
+방 만들기 · 코드로 입장 · 랜덤 매칭 · 1:1 채팅 · **게임 시작** 은 전부
+**웹소켓**으로 되어 있습니다. 웹소켓은 스와거가 자동으로 그려주지 못해서
+(FastAPI 가 `@app.websocket()` 경로를 `/openapi.json` 에 넣지 않습니다)
+**여기에 한 줄도 나오지 않습니다.**
+
+### 👉 웹소켓 문서는 여기입니다
+
+| 무엇 | 주소 | 스와거로 치면 |
+|------|------|---------------|
+| 눈으로 보는 화면 | [`/ws-docs`](/ws-docs) | 이 화면(`/docs`) 자리 |
+| 기계가 읽는 계약서 | [`/asyncapi.json`](/asyncapi.json) | `/openapi.json` 자리 |
+| 사람이 읽는 설명 | `docs/ws-contract.md` | — |
+
+**프론트엔드 담당은 `/docs` 와 `/ws-docs` 를 둘 다 봐야 합니다.**
+한쪽만 보면 절반을 놓칩니다.
+
+## 지금 있는 웹소켓 통로
+
+| 주소 | 하는 일 |
+|------|---------|
+| `/ws/rooms` | 방 만들고 기다리기 (방장) |
+| `/ws/rooms/{code}` | 초대 코드로 들어가기 (친구) |
+| `/ws/match` | 코드 없이 랜덤 매칭 |
+| `/ws` | 연결 확인용 (메아리) |
+
+**게임 시작**은 위 통로 위에서 오가는 메시지입니다. 방장이 `{"type":"start"}`
+를 보내면 양쪽에 `game_started` 가 갑니다. 자세한 내용은 [`/ws-docs`](/ws-docs) 를 보세요.
+"""
+
+# 스와거는 태그(묶음)마다 설명을 달 수 있습니다. 경로 목록 바로 위에
+# 뜨기 때문에, 웹소켓 안내를 한 번 더 눈에 띄게 둘 수 있는 자리입니다.
+OPENAPI_TAGS = [
+    {
+        "name": "플레이어",
+        "description": "닉네임을 더하고, 보고, 고치고, 지웁니다. 요청하면 답하는 **HTTP API** 입니다.",
+    },
+    {
+        "name": "게임",
+        "description": (
+            "게임의 **고정된 규칙**입니다. 칩(타일) 구성과 보드 배열처럼 "
+            "방마다 달라지지 않는 값이라, 프론트엔드가 시작할 때 한 번만 "
+            "받아 두면 됩니다.\n\n"
+            "게임을 실제로 **진행하는 것**(칩 나눠주기·단어 놓기·점수)은 "
+            "웹소켓 쪽입니다. 아래 「웹소켓 명세」를 보세요."
+        ),
+    },
+    {
+        "name": "웹소켓 명세",
+        "description": (
+            "**웹소켓 기능은 이 화면에 나오지 않습니다.** 아래 주소로 가야 볼 수 있습니다.\n\n"
+            "방 만들기 · 코드로 입장 · 랜덤 매칭 · 1:1 채팅 · **게임 시작"
+            "(`start` → `game_started`)** 이 전부 거기 적혀 있습니다.\n\n"
+            "👉 사람이 보는 화면: [`/ws-docs`](/ws-docs)"
+        ),
+    },
+]
 
 app = FastAPI(
     title="스크래블 백엔드",
-    description="기본용 백엔드입니다. FastAPI가 자동으로 만들어 준 스와거 문서를 /docs 에서 볼 수 있어요.",
+    description=API_DESCRIPTION,
     version="0.1.0",
+    openapi_tags=OPENAPI_TAGS,
 )
 
 # CORS: 다른 주소(프론트엔드)에서 온 브라우저 호출을 허용합니다.
@@ -111,7 +194,7 @@ class PlayerOut(BaseModel):
     created_at: datetime
 
 
-@app.post("/api/players", response_model=PlayerOut, status_code=201)
+@app.post("/api/players", response_model=PlayerOut, status_code=201, tags=["플레이어"])
 def create_player(player: PlayerCreate):
     """새 플레이어 닉네임을 DB에 저장하고, 저장된 결과를 돌려줍니다.
 
@@ -133,7 +216,7 @@ def create_player(player: PlayerCreate):
     return PlayerOut(id=row[0], nickname=row[1], created_at=row[2])
 
 
-@app.get("/api/players", response_model=List[PlayerOut])
+@app.get("/api/players", response_model=List[PlayerOut], tags=["플레이어"])
 def list_players():
     """저장된 플레이어를 전부 돌려줍니다. (id 오름차순 = 먼저 만든 순서)
 
@@ -169,7 +252,7 @@ class NicknameCheckOut(BaseModel):
     exists: bool = Field(..., description="True면 이미 쓰는 사람이 있음")
 
 
-@app.get("/api/players/check-nickname", response_model=NicknameCheckOut)
+@app.get("/api/players/check-nickname", response_model=NicknameCheckOut, tags=["플레이어"])
 def check_nickname(
     nickname: Annotated[
         str,
@@ -204,7 +287,7 @@ def check_nickname(
     return NicknameCheckOut(nickname=nickname, exists=exists)
 
 
-@app.put("/api/players/{player_id}", response_model=PlayerOut)
+@app.put("/api/players/{player_id}", response_model=PlayerOut, tags=["플레이어"])
 def update_player(player_id: int, player: PlayerUpdate):
     """기존 플레이어의 닉네임을 바꿉니다.
 
@@ -232,7 +315,7 @@ def update_player(player_id: int, player: PlayerUpdate):
     return PlayerOut(id=row[0], nickname=row[1], created_at=row[2])
 
 
-@app.delete("/api/players/{player_id}", response_model=PlayerOut)
+@app.delete("/api/players/{player_id}", response_model=PlayerOut, tags=["플레이어"])
 def delete_player(player_id: int):
     """플레이어를 삭제하고, 삭제된 사람의 정보를 돌려줍니다.
 
@@ -360,6 +443,45 @@ class LiveRoom:
         self.host_nickname = host_nickname
         self.guest: Optional[WebSocket] = None  # 나중에 들어올 친구의 연결
         self.guest_nickname: Optional[str] = None
+
+        # 방장이 "시작"을 눌렀는가.
+        #
+        # DB 의 `rooms.started_at` 에도 같은 사실이 남지만, 여기에도 두는
+        # 이유는 **매번 물어보지 않기 위해서**입니다. "이미 시작했나?"는
+        # 시작 요청이 올 때마다 확인해야 하는데, 그때마다 DB 에 다녀오면
+        # 그 사이에 다른 사람의 처리가 끼어들 수 있습니다.
+        # 지금 켜져 있는 이 방의 상태는 메모리가 가장 빠르고 정확합니다.
+        self.started = False
+
+        # 이번 게임에서 누가 먼저 두는가. 아직 시작 전이면 None.
+        self.first_turn: Optional[str] = None
+
+        # ── 이번 판의 칩 ────────────────────────────────────
+        #
+        # 아직 아무에게도 가지 않은 타일들. 시작할 때 100개를 섞어 넣고,
+        # 각자 7개씩 가져가면 86개가 남습니다.
+        self.bag: List[str] = []
+
+        # 각자 손에 들고 있는 칩.
+        #
+        # 닉네임이 아니라 **방장/친구 자리**로 나눠 둡니다. 둘 다 "수진"일
+        # 수 있어서 닉네임을 열쇠로 쓰면 두 사람의 칩이 한 칸에 섞입니다.
+        self.host_rack: List[str] = []
+        self.guest_rack: List[str] = []
+
+    def clear_game(self) -> None:
+        """이번 판을 없던 것으로 되돌립니다.
+
+        게임이 끝났거나(상대가 나감) 시작에 실패했을 때 씁니다. 지울 것을
+        한 군데 모아 두는 이유: 나중에 게임 상태가 늘어날 때마다 "여기서도
+        지워야 하나?"를 여러 곳에서 따지게 되는데, 한 군데를 빠뜨리면
+        **지난 판의 칩이 다음 판에 섞여 들어옵니다.**
+        """
+        self.started = False
+        self.first_turn = None
+        self.bag = []
+        self.host_rack = []
+        self.guest_rack = []
 
 
 # 지금 살아 있는 방들. { 초대 코드: LiveRoom }
@@ -495,12 +617,192 @@ async def send_quietly(websocket: Optional[WebSocket], payload: dict) -> None:
         pass
 
 
+# ─────────────────────────────────────────────────────────────
+# 게임 시작
+#
+# 두 사람이 다 모였다고 게임이 저절로 시작되지는 않습니다. 들어오자마자
+# 판이 시작되면 준비할 틈이 없기 때문입니다. **방장이 "시작"을 눌러야**
+# 비로소 시작됩니다.
+#
+# 왜 방장만 누를 수 있나: 둘 다 누를 수 있으면 거의 동시에 눌렀을 때
+# 게임이 두 번 시작될 수 있고, 무엇보다 "언제 시작할지"를 정하는 사람이
+# 둘이면 아무도 정하지 못합니다. 한 명에게 맡기는 편이 단순합니다.
+#
+# 방장이 누구인가:
+#   코드로 만난 방  → 방을 만든 사람 (`/ws/rooms` 로 접속한 쪽)
+#   랜덤 매칭       → 먼저 와서 기다린 사람 (`pair_up` 의 `first`)
+# 어느 쪽이든 `LiveRoom.host` 에 그 사람의 연결이 들어 있어서, 굳이
+# 나눠서 처리하지 않아도 됩니다.
+#
+# 시작하면 **칩을 7개씩 나눠 줍니다.** 100개를 섞어 가방에 넣고 각자
+# 7개씩 가져가면 86개가 남습니다.
+#
+# ⚠️ 여기까지가 "시작"입니다. 판에 단어를 놓거나 점수를 매기는 일은
+#    아직 없습니다. 그건 각각 따로 만들 기능입니다.
+# ─────────────────────────────────────────────────────────────
+
+# 칩을 섞는 데 쓸 주사위.
+#
+# 그냥 `random` 이 아니라 `secrets` 쪽을 쓰는 이유: `random` 으로 섞은
+# 순서는 예측할 수 있습니다. 가방 순서를 예측당하면 **상대가 다음에 뽑을
+# 칩을 미리 알게 됩니다.** 초대 코드에 `secrets` 를 쓴 것과 같은 이유입니다.
+_shuffler = secrets.SystemRandom()
+
+
+def deal_tiles(room: LiveRoom) -> None:
+    """칩 100개를 섞어 **각자 7개씩** 나눠 주고, 나머지는 방 가방에 둡니다.
+
+    `game_data.build_bag()` 은 항상 같은 순서(E 부터 쭉)로 주기 때문에
+    **반드시 섞어야 합니다.** 안 섞으면 매 게임 두 사람 모두 E 만 일곱 개를
+    받습니다.
+
+    뒤에서부터 꺼내는(`pop`) 이유: 앞에서 꺼내면 남은 것을 매번 한 칸씩
+    앞으로 당겨야 합니다. 이미 섞여 있으니 어느 쪽 끝에서 꺼내든 무작위인
+    것은 같고, 뒤에서 꺼내는 편이 그냥 더 쌉니다.
+    """
+    bag = build_bag()
+    _shuffler.shuffle(bag)
+
+    room.host_rack = [bag.pop() for _ in range(RACK_SIZE)]
+    room.guest_rack = [bag.pop() for _ in range(RACK_SIZE)]
+    room.bag = bag
+
+
+def mark_room_started(code: str) -> datetime:
+    """방을 "시작됨"으로 표시하고, **DB 가 찍은 시각**을 돌려줍니다.
+
+    시각을 파이썬이 아니라 DB 에서 만드는 이유는 `insert_message` 와
+    같습니다. 기록에 남는 시각과 양쪽 화면에 뜨는 시각이 한 글자도
+    다르지 않게 하려는 것입니다.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE rooms SET started_at = now() WHERE code = %s"
+                " RETURNING started_at",
+                (code,),
+            )
+            return cur.fetchone()[0]
+
+
+async def start_game(websocket: WebSocket, room: LiveRoom) -> None:
+    """방장의 시작 요청을 처리하고 **양쪽 모두에게** 알립니다.
+
+    안 되는 경우에는 요청한 사람에게만 이유를 돌려주고, 상대에게는
+    아무것도 보내지 않습니다. 실패는 요청한 사람의 사정이라, 상대
+    화면에 알 수 없는 메시지가 뜨면 오히려 혼란스럽기 때문입니다.
+    """
+    # ① 요청한 사람이 방장인가
+    #
+    # 닉네임이 아니라 **연결**을 비교합니다. 닉네임은 서로 같을 수
+    # 있어서(둘 다 "수진"), 닉네임으로 판단하면 친구가 방장 이름을
+    # 그대로 쓰는 것만으로 게임을 시작할 수 있게 됩니다.
+    if websocket is not room.host:
+        await websocket.send_json(
+            {"type": "error", "message": "방장만 게임을 시작할 수 있습니다"}
+        )
+        return
+
+    # ② 이미 시작한 게임인가
+    #
+    # 방장이 버튼을 두 번 눌렀거나 화면이 굼떠서 두 번 보내진 경우입니다.
+    # 막지 않으면 진행 중인 게임이 처음으로 되돌아갑니다.
+    if room.started:
+        await websocket.send_json(
+            {"type": "error", "message": "이미 시작된 게임입니다"}
+        )
+        return
+
+    # ③ 두 명이 다 모였는가
+    #
+    # 혼자 시작하면 상대가 들어왔을 때 이미 진행 중인 판에 끼어드는
+    # 셈이 됩니다. 스크래블은 최소 두 명이 있어야 합니다.
+    if room.guest is None or room.guest_nickname is None:
+        await websocket.send_json(
+            {"type": "error", "message": "아직 상대가 들어오지 않았습니다"}
+        )
+        return
+
+    # 먼저 표시해 두고 그다음 DB 에 적습니다.
+    #
+    # 순서가 중요합니다. DB 를 먼저 다녀오면 그동안(await) 방장이 한 번
+    # 더 누른 요청이 끼어들어 ② 를 통과해 버립니다. 메모리에 먼저 찍어
+    # 두면 두 번째 요청은 반드시 ② 에서 막힙니다.
+    room.started = True
+
+    # 누가 먼저 둘지 정합니다. **방장이 아니라 무작위**입니다.
+    # 스크래블에서 선공은 유리한 자리라, 방을 만들었다는 이유만으로
+    # 매번 먼저 두게 하면 공평하지 않습니다.
+    #
+    # `random` 이 아니라 `secrets` 를 쓰는 것은 초대 코드와 같은 이유로,
+    # 다음 값을 예측당하지 않기 위해서입니다.
+    room.first_turn = secrets.choice([room.host_nickname, room.guest_nickname])
+
+    # 칩을 섞어 각자 7개씩 나눠 줍니다.
+    #
+    # DB 에 적기 **전에** 나눠 두는 이유: 나누는 일은 메모리 안에서만
+    # 일어나 실패할 구석이 없습니다. 반대로 DB 는 실패할 수 있어서, DB 를
+    # 먼저 성공시켜 놓고 여기서 문제가 나면 "시작했다고 기록됐는데 칩은
+    # 없는" 상태가 됩니다. 실패할 수 있는 일을 마지막에 두는 게 낫습니다.
+    deal_tiles(room)
+
+    try:
+        started_at = await run_in_threadpool(mark_room_started, room.code)
+    except Exception:
+        # 기록에 실패했으면 시작하지 않은 것으로 되돌립니다. 그냥
+        # 진행하면 화면에서는 게임 중인데 기록에는 시작한 적이 없는
+        # 상태가 되어, 나중에 무슨 일이 있었는지 알 수 없게 됩니다.
+        # 나눠 준 칩도 함께 물립니다.
+        room.clear_game()
+        await websocket.send_json(
+            {"type": "error", "message": "게임을 시작하지 못했습니다. 잠시 후 다시 눌러 주세요"}
+        )
+        return
+
+    # 여기부터는 **양쪽에 보내는 내용이 다릅니다.**
+    #
+    # 칩이 생기기 전까지는 똑같은 값을 보냈지만, 이제는 그러면 안 됩니다.
+    # 한 번에 같은 걸 보내면 **상대의 칩이 내 화면에 그대로 도착합니다.**
+    # 프론트엔드가 안 그리면 된다고 생각하기 쉬운데, 브라우저 개발자
+    # 도구를 열면 오간 내용이 그대로 보입니다. 애초에 **보내지 않는**
+    # 것만이 가리는 방법입니다.
+    common = {
+        "type": "game_started",
+        "code": room.code,
+        "host_nickname": room.host_nickname,
+        "guest_nickname": room.guest_nickname,
+        "first_turn": room.first_turn,
+        "at": started_at.isoformat(),
+        # 가방에 남은 개수는 양쪽 다 알아도 되는 값입니다. 실제 스크래블
+        # 에서도 남은 타일 수는 서로 볼 수 있습니다. (무엇이 남았는지는 아님)
+        "tiles_left": len(room.bag),
+    }
+
+    # `rack` 은 **받는 사람 자기 것**입니다. 상대 것은 개수만 보냅니다.
+    # 프론트엔드가 상대 칩을 뒷면으로 몇 장 그릴지 알아야 하기 때문입니다.
+    await send_quietly(
+        room.host,
+        {**common, "rack": room.host_rack, "partner_tile_count": len(room.guest_rack)},
+    )
+    await send_quietly(
+        room.guest,
+        {**common, "rack": room.guest_rack, "partner_tile_count": len(room.host_rack)},
+    )
+
+
 async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) -> None:
-    """연결이 끊길 때까지 채팅 메시지를 받아 **저장하고 상대에게 건네줍니다.**
+    """연결이 끊길 때까지 **들어온 요청을 처리합니다.**
+
+    지금 받는 요청은 두 가지입니다.
+      `{"type":"message","text":"..."}`  대화 한 줄 보내기
+      `{"type":"start"}`                 게임 시작 (방장만)
 
     방장 쪽과 친구 쪽이 이 함수 하나를 같이 씁니다. 1:1 이라 양쪽이
     하는 일이 완전히 똑같기 때문입니다. 두 벌로 나눠 적으면 나중에
     한쪽만 고쳐서 "방장은 되는데 친구는 안 되는" 사고가 납니다.
+    (게임 시작처럼 **방장만 할 수 있는 일**도 여기서 함께 받고,
+     방장인지 아닌지는 `start_game` 안에서 가립니다. 받는 창구를
+     나누면 그 창구에 안 오는 쪽이 조용히 빠지기 쉽습니다.)
 
     `find_context` 는 "지금 어느 방이고 상대가 누구인지"를 그때그때
     알려주는 함수입니다. `(방, 상대)` 를 주고, 아직 상대가 없으면
@@ -522,8 +824,7 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
             )
             continue
 
-        # ② 우리가 아는 종류인가
-        if not isinstance(data, dict) or data.get("type") != "message":
+        if not isinstance(data, dict):
             await websocket.send_json(
                 {
                     "type": "error",
@@ -532,14 +833,43 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
             )
             continue
 
-        # ③ 내용이 규칙에 맞는가
+        # ② 게임 시작 요청인가
+        #
+        # 대화보다 먼저 봅니다. 이 요청에는 `text` 가 없어서, 아래
+        # 대화 처리로 흘려보내면 "빈 메시지는 보낼 수 없습니다"라는
+        # 엉뚱한 답을 받게 됩니다.
+        if data.get("type") == "start":
+            context = find_context()
+            if context is None:
+                # 방에 아직 나 혼자입니다. 방장이든 아니든 할 수 있는
+                # 일이 없으므로 같은 답을 줍니다.
+                await websocket.send_json(
+                    {"type": "error", "message": "아직 상대가 들어오지 않았습니다"}
+                )
+                continue
+
+            room, _ = context
+            await start_game(websocket, room)
+            continue
+
+        # ③ 우리가 아는 종류인가
+        if data.get("type") != "message":
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": '{"type":"message","text":"..."} 또는 {"type":"start"} 형식으로 보내주세요',
+                }
+            )
+            continue
+
+        # ④ 내용이 규칙에 맞는가
         try:
             text = clean_chat_text(str(data.get("text", "")))
         except ValueError as e:
             await websocket.send_json({"type": "error", "message": str(e)})
             continue
 
-        # ④ 건네줄 상대가 있는가
+        # ⑤ 건네줄 상대가 있는가
         context = find_context()
         if context is None:
             await websocket.send_json(
@@ -549,7 +879,7 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
 
         room, partner = context
 
-        # ⑤ 먼저 저장하고, 그다음 건네줍니다.
+        # ⑥ 먼저 저장하고, 그다음 건네줍니다.
         #
         # 순서가 중요합니다. 건네준 뒤에 저장하면, 저장이 실패했을 때
         # **화면에는 떴는데 기록에는 없는** 말이 생깁니다. 나중에 대화를
@@ -978,11 +1308,122 @@ async def join_room(websocket: WebSocket, code: str, nickname: str = Query(defau
         if live_rooms.get(code) is room and room.guest is websocket:
             room.guest = None
             room.guest_nickname = None
+
+            # 게임 중이었다면 그 판은 여기서 끝난 것입니다. 상대가 없는
+            # 스크래블은 이어갈 수 없기 때문입니다. 표시를 지워 두지
+            # 않으면, 새 친구가 들어와도 방장이 "이미 시작된 게임입니다"만
+            # 보게 되어 **영영 시작할 수 없는 방**이 됩니다.
+            #
+            # 나눠 줬던 칩도 함께 버립니다. 남겨 두면 다음 판에 지난 판의
+            # 칩이 섞여 들어와서, 가방에 같은 타일이 두 번 생깁니다.
+            room.clear_game()
+
             # 자리가 다시 비었으니 방장은 새 친구를 기다릴 수 있습니다.
             await run_in_threadpool(set_room_status, code, "waiting")
             await send_quietly(
                 room.host, {"type": "guest_left", "nickname": guest_nickname}
             )
+
+
+# ─────────────────────────────────────────────────────────────
+# 게임 기초 데이터 API — 칩 구성과 보드 배열 내주기
+#
+# 값 자체는 `game_data.py` 에 있고, 여기서는 **프론트엔드가 가져갈 수
+# 있게 내주기만** 합니다.
+#
+# 왜 API 로 내주는가:
+#   프론트엔드도 보드를 그리려면 어느 칸이 "글자 2배"인지 알아야 합니다.
+#   그런데 그 표를 프론트엔드가 **따로 적어 두면**, 규칙이 두 군데
+#   존재하게 됩니다. 한쪽만 고치는 날 두 화면이 서로 다른 보드를 그리고,
+#   그건 눈으로 찾기 아주 어렵습니다.
+#   규칙의 원본은 백엔드 한 곳이고, 프론트엔드는 받아서 그리기만 합니다.
+#
+# 왜 웹소켓이 아니라 HTTP 인가:
+#   이 값은 **바뀌지 않습니다.** 서버가 먼저 알려줄 일이 없으니 웹소켓을
+#   쓸 이유가 없습니다. 프론트엔드가 필요할 때 한 번 물어보면 끝입니다.
+#   반대로 "칩을 나눠줬다"는 소식은 상대 때문에 생기는 일이라 웹소켓입니다.
+# ─────────────────────────────────────────────────────────────
+class TileOut(BaseModel):
+    """타일 한 종류."""
+
+    letter: str = Field(
+        ...,
+        description='글자. `"?"` 는 **빈 타일**로, 아무 글자로나 쓸 수 있는 대신 0점입니다.',
+        examples=["E"],
+    )
+    count: int = Field(..., description="가방에 들어 있는 개수", examples=[12])
+    points: int = Field(..., description="이 글자 하나의 점수", examples=[1])
+
+
+class PremiumOut(BaseModel):
+    """특수 칸 한 종류가 무슨 뜻인지."""
+
+    name: str = Field(..., description="사람이 읽는 이름", examples=["글자 2배"])
+    multiplier: int = Field(..., description="몇 배인지", examples=[2])
+    applies_to: str = Field(
+        ...,
+        description='`"letter"` 면 그 글자에만, `"word"` 면 단어 전체에 걸립니다',
+        examples=["letter"],
+    )
+
+
+class GameSetupOut(BaseModel):
+    """게임을 그리는 데 필요한 고정 값 한 묶음."""
+
+    board_size: int = Field(..., description="보드 한 변의 칸 수", examples=[15])
+    board: List[List[str]] = Field(
+        ...,
+        description=(
+            "보드 배열. **위에서 아래로** 한 줄씩이고, `board[줄][칸]` 으로 찾습니다. "
+            "둘 다 0 부터 셉니다. 빈 문자열은 보통 칸이고, 나머지는 `premium_legend` "
+            "에 뜻이 적혀 있습니다."
+        ),
+    )
+    premium_legend: Dict[str, PremiumOut] = Field(
+        ..., description="특수 칸 기호가 각각 무슨 뜻인지"
+    )
+    center: List[int] = Field(
+        ...,
+        description="한가운데 시작 칸의 `[줄, 칸]`. **첫 단어는 반드시 여기를 지나야 합니다.**",
+        examples=[[7, 7]],
+    )
+    tiles: List[TileOut] = Field(..., description="칩(타일) 구성")
+    total_tiles: int = Field(
+        ..., description="가방에 들어 있는 타일 전체 개수", examples=[100]
+    )
+    rack_size: int = Field(
+        ..., description="한 사람이 손에 들고 있는 타일 수", examples=[7]
+    )
+
+
+@app.get("/api/game/setup", response_model=GameSetupOut, tags=["게임"])
+def game_setup():
+    """게임을 그리는 데 필요한 **고정 값**을 한 번에 돌려줍니다.
+
+    칩(타일) 구성과 보드 배열입니다. **언제 불러도 항상 같은 값**이라
+    프론트엔드는 시작할 때 한 번만 받아 두면 됩니다.
+
+    ⚠️ 여기에 **"지금 이 게임의 상태"는 없습니다.** 누가 어떤 칩을 들고
+    있는지, 보드에 무엇이 놓였는지는 방마다 다르고 매 순간 바뀌는 값이라
+    이 API 가 아니라 웹소켓으로 오갑니다. 규칙과 상태를 한곳에 섞으면
+    게임이 끝날 때마다 규칙을 다시 받아야 합니다.
+    """
+    return GameSetupOut(
+        board_size=BOARD_SIZE,
+        # 안쪽이 튜플이라 그대로 두면 JSON 으로 나갈 때 헷갈릴 수 있어
+        # 목록으로 바꿔 줍니다.
+        board=[list(row) for row in BOARD_LAYOUT],
+        premium_legend={
+            key: PremiumOut(**value) for key, value in PREMIUM_LEGEND.items()
+        },
+        center=[CENTER, CENTER],
+        tiles=[
+            TileOut(letter=letter, count=count, points=points)
+            for letter, count, points in TILE_DISTRIBUTION
+        ],
+        total_tiles=TOTAL_TILES,
+        rack_size=RACK_SIZE,
+    )
 
 
 # ─────────────────────────────────────────────────────────────

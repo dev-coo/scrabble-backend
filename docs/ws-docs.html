@@ -355,16 +355,20 @@ function render(spec) {
         <button id="disc" disabled>끊기</button>
       </div>
       <div class="row">
-        <input type="text" id="text" placeholder="보낼 말을 입력하세요" disabled>
+        <input type="text" id="text" placeholder='JSON 으로 보내세요. 예: {"type":"message","text":"안녕"}' disabled>
         <button id="send" disabled>보내기</button>
+      </div>
+      <div class="row">
+        <button class="quick" data-send='{"type":"message","text":"안녕"}' disabled>인사 보내기</button>
+        <button class="quick" data-send='{"type":"start"}' disabled>게임 시작 (방장만)</button>
       </div>
       <div id="log"><p class="sys">아직 아무것도 오가지 않았습니다.</p></div>
     </div>
 
     <h2>아직 없는 것</h2>
-    <p>지금은 <b>통로만</b> 있습니다. 아래는 하나도 구현돼 있지 않습니다.</p>
+    <p>여기까지는 <b>만나서 대화하고, 게임을 시작하는 것</b>까지입니다. 아래는 아직 없습니다.</p>
     <ul class="plain">${notYet}</ul>
-    <p class="empty">두 명이 각각 접속해도 서로의 메시지는 보이지 않고, 각자 자기 메아리만 받습니다.</p>
+    <p class="empty">가장 중요한 것부터: <b>게임 시작 버튼을 눌러도 실제로 둘 수 있는 게 아직 없습니다.</b></p>
 
     <h2>연결이 끊기는 경우</h2>
     <table><thead><tr><th>상황</th><th>결과</th></tr></thead><tbody>${disconnect}</tbody></table>
@@ -401,6 +405,7 @@ function wireTryIt() {
     $("disc").disabled = !on;
     $("text").disabled = !on;
     $("send").disabled = !on;
+    document.querySelectorAll("button.quick").forEach((b) => { b.disabled = !on; });
   }
 
   $("conn").onclick = () => {
@@ -427,15 +432,25 @@ function wireTryIt() {
   // (닉네임을 바꿔서 연결해 보려면 그렇게 하세요)
   $("chan").onchange = (e) => { $("url").value = e.target.value; };
 
-  function send() {
-    const text = $("text").value;
+  function sendRaw(text) {
     if (!ws || ws.readyState !== WebSocket.OPEN || !text) return;
     ws.send(text);
     add("out", "▶ " + text);
+  }
+
+  function send() {
+    sendRaw($("text").value);
     $("text").value = "";
   }
   $("send").onclick = send;
   $("text").onkeydown = (e) => { if (e.key === "Enter") send(); };
+
+  // 자주 쓰는 메시지를 손으로 타이핑하지 않고 바로 보내는 버튼입니다.
+  // JSON 을 한 글자라도 틀리면 error 가 돌아오는데, 그게 기능 문제인지
+  // 오타인지 헷갈리기 때문입니다.
+  document.querySelectorAll("button.quick").forEach((b) => {
+    b.onclick = () => sendRaw(b.dataset.send);
+  });
 }
 
 // ── 시작 ────────────────────────────────────────────────────

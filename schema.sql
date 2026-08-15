@@ -127,6 +127,19 @@ ALTER TABLE rooms DROP CONSTRAINT IF EXISTS rooms_host_nickname_valid;
 ALTER TABLE rooms ADD  CONSTRAINT rooms_host_nickname_valid
     CHECK (length(trim(host_nickname)) BETWEEN 1 AND 20);
 
+-- 게임이 실제로 시작된 시각. 아직 시작 안 했으면 NULL.
+--
+-- status 로는 이걸 알 수 없습니다. status 가 'playing' 이 되는 시점은
+-- **두 사람이 다 모였을 때**지, 방장이 시작을 누른 때가 아닙니다.
+-- 그래서 "모였지만 아직 시작 전"과 "게임 중"이 status 만으로는
+-- 구분되지 않습니다. 이 칸이 그 둘을 갈라 줍니다.
+--
+-- 시각(timestamp)으로 둔 이유: true/false 로 두면 "시작했다"만 알 수
+-- 있지만, 시각으로 두면 **언제 시작했는지**까지 남습니다. 나중에
+-- "이 게임은 몇 분 걸렸나"를 물어볼 때 칸을 새로 만들지 않아도 됩니다.
+-- 값이 있으면 곧 "시작했다"는 뜻이라 잃는 것도 없습니다.
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS started_at timestamp;
+
 
 -- ─────────────────────────────────────────────────────────────
 -- messages — 오간 대화 한 줄 한 줄
