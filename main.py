@@ -14,7 +14,7 @@
 import json
 import secrets
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Deque, Dict, List, Optional
 
@@ -728,7 +728,7 @@ def load_messages(room_id: int) -> List[dict]:
             rows = cur.fetchall()
 
     return [
-        {"from": sender, "text": text, "at": created_at.isoformat()}
+        {"from": sender, "text": text, "at": iso_utc(created_at)}
         for sender, text, created_at in reversed(rows)
     ]
 
@@ -834,6 +834,24 @@ def deal_tiles(room: LiveRoom) -> None:
 
 # 빈 칸을 나타내는 값. 보드는 15×15 이고, 글자가 없는 칸은 빈 문자열입니다.
 EMPTY = ""
+
+
+def iso_utc(when: Optional[datetime]) -> Optional[str]:
+    """시각을 **시간대까지 붙여서** 글자로 바꿉니다.
+
+    그냥 `isoformat()` 을 쓰면 `2026-08-22T16:29:33` 처럼 나옵니다.
+    시간대가 안 붙어 있으면 **브라우저는 이걸 자기 지역 시각으로 읽습니다.**
+    서버는 UTC 로 도는데 보는 사람은 한국에 있어서, 방금 보낸 메시지가
+    9시간 뒤에 온 것처럼 보였습니다.
+
+    DB 칼럼이 `timestamp`(시간대 없음)라 값 자체에는 시간대가 없습니다.
+    서버와 DB 를 둘 다 UTC 로 돌리고 있으므로(`Etc/UTC`) 여기서 "이건
+    UTC 다"라고 붙여 줍니다. 그러면 브라우저가 보는 사람의 지역 시각으로
+    알아서 바꿔 그립니다.
+    """
+    if when is None:
+        return None
+    return when.replace(tzinfo=timezone.utc).isoformat()
 
 
 def new_board() -> List[List[str]]:
@@ -1330,7 +1348,7 @@ async def end_game(
         "winner": winner,
         "scores": {"host": room.host_score, "guest": room.guest_score},
         "board": room.board,
-        "at": ended_at.isoformat() if ended_at else None,
+        "at": iso_utc(ended_at),
     }
     if quitter is not None:
         payload["by"] = quitter
@@ -1913,7 +1931,7 @@ async def start_game(websocket: WebSocket, room: LiveRoom) -> None:
         # `turn` 은 "지금 차례"라 한 수마다 바뀝니다. 시작 시점에는 둘이
         # 같은 값이지만 뜻이 다릅니다.
         "turn": room.turn_nickname,
-        "at": started_at.isoformat(),
+        "at": iso_utc(started_at),
         # 가방에 남은 개수는 양쪽 다 알아도 되는 값입니다. 실제 스크래블
         # 에서도 남은 타일 수는 서로 볼 수 있습니다. (무엇이 남았는지는 아님)
         "tiles_left": len(room.bag),
@@ -2106,7 +2124,7 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
                 "text": text,
                 # 시각은 **DB 가 저장하면서 찍은 값**입니다. 저장된 기록과
                 # 화면에 뜨는 시각이 어긋나지 않게 하려는 것입니다.
-                "at": sent_at.isoformat(),
+                "at": iso_utc(sent_at),
             }
         )
 
