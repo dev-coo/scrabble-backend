@@ -2030,6 +2030,31 @@ async def chat_loop(websocket: WebSocket, sender_nickname: str, find_context) ->
                 continue
 
             room, _ = context
+
+            # ⚠️⚠️ 발표 시연용으로 **일부러 심어 둔 오류**입니다 ⚠️⚠️
+            #
+            # 끝난 판에서 "한 판 더"를 누르면 여기서 터집니다. 판은 15줄
+            # 짜리인데 99번째 줄을 건드리니 IndexError 가 납니다.
+            #
+            # 보여주려는 것: 오류의 **진짜 내용(어느 파일 몇 번째 줄,
+            # 무슨 예외)은 Sentry 로만** 가고, 사용자 화면에는 짧은 안내
+            # 한 줄만 간다는 것입니다. 서버 사정을 화면에 그대로 흘리면
+            # 사용자는 이해하지 못하고, 공격자에게는 힌트가 됩니다.
+            #
+            # 심은 날 2026-08-23.
+            # ⚠️ **발표가 끝나면 이 if 블록을 통째로 지우세요.**
+            if room.finished:
+                try:
+                    room.board[99][99] = ""
+                except Exception as e:
+                    import sentry_sdk
+
+                    sentry_sdk.capture_exception(e)
+                    await websocket.send_json(
+                        {"type": "error", "message": "에러가 발생했어요"}
+                    )
+                    continue
+
             await start_game(websocket, room)
             continue
 
